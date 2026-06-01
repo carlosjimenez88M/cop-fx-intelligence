@@ -1,0 +1,108 @@
+"""Integration test: run the full pipeline with mocked external calls."""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pandas as pd
+import pytest
+
+from cop_fx.agents.graph import run_pipeline
+from cop_fx.data.news_fetcher import Article
+
+
+@pytest.fixture()
+def synthetic_fx_df() -> pd.DataFrame:
+    import numpy as np
+
+    rng = np.random.default_rng(0)
+    dates = pd.date_range("2023-01-01", periods=250, freq="B")
+    values = 4000.0 + rng.normal(0, 30, 250).cumsum()
+    return pd.DataFrame({"ds": dates, "y": values})
+
+
+@pytest.mark.integration()
+def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    fake_articles = [
+        Article(
+            title="Colombia registra déficit comercial",
+            summary="El déficit comercial se amplió en abril según el DANE.",
+            url="https://example.com/news/1",
+            published_at=datetime.now(tz=timezone.utc),
+            source="El Tiempo",
+        ),
+        Article(
+            title="Petróleo cae 3% por temores de recesión",
+            summary="Los precios del petróleo cayeron presionados por datos económicos de EEUU.",
+            url="https://example.com/news/2",
+            published_at=datetime.now(tz=timezone.utc),
+            source="Portafolio",
+        ),
+    ]
+
+    llm_json = (
+        '[{"index":0,"topic":"trade","severity":"medium","bullish_cop":false,"reasoning":"deficit"},'
+        '{"index":1,"topic":"commodities","severity":"high","bullish_cop":false,"reasoning":"oil drop"}]'
+    )
+    llm_narrative = "---\nPeso under pressure from weak commodities and trade deficit."
+
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content=llm_json + "\n" + llm_narrative)
+
+    with (
+        patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
+        patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
+        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+    ):
+        settings = MagicMock()
+        settings.forecast_horizon_days = 5
+        settings.report_output_dir = str(tmp_path)
+        settings.twitter_enabled = False
+        MockSettings.return_value = settings
+        MockFX.return_value.fetch.return_value = synthetic_fx_df
+        MockNews.return_value.fetch.return_value = fake_articles
+
+        final_state = run_pipeline(run_date="2024-06-01", publish_enabled=False)
+
+    # Validate output keys
+    assert "report_markdown" in final_state
+    assert "ensemble_df" in final_state
+    assert "tweet_text" in final_state
+
+    # No catastrophic errors
+    errors = final_state.get("errors", [])
+    assert errors == [], f"Pipeline errors: {errors}"
+
+    # Report written to disk
+    import os
+
+    report_path = final_state.get("report_path", "")
+    assert os.path.isfile(report_path)
+
+
+@pytest.mark.integration()
+def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
+    mock_llm = MagicMock()
+    mock_llm.invoke.return_value = MagicMock(content='[]\n---\nNo news to analyze.')
+
+    with (
+        patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
+        patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
+        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+    ):
+        settings = MagicMock()
+        settings.forecast_horizon_days = 3
+        settings.report_output_dir = str(tmp_path)
+        settings.twitter_enabled = False
+        MockSettings.return_value = settings
+        MockFX.return_value.fetch.return_value = synthetic_fx_df
+        MockNews.return_value.fetch.side_effect = ConnectionError("RSS unreachable")
+
+        final_state = run_pipeline(run_date="2024-06-01")
+
+    # fx and forecast should still work despite news failure
+    assert "ensemble_df" in final_state
+    assert any("fetch_news" in e for e in final_state.get("errors", []))
