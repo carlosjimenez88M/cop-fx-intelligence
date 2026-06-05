@@ -6,11 +6,11 @@ from cop_fx.logger import get_logger
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from langchain_anthropic import ChatAnthropic
+from langchain_core.language_models.chat_models import BaseChatModel
 from langchain_core.messages import HumanMessage
 
 from cop_fx.agents.state import PipelineState
-from cop_fx.config.settings import get_settings
+from cop_fx.llm import get_chat_model
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.timeseries.evaluator import evaluate
@@ -19,13 +19,9 @@ from cop_fx.timeseries.models import ARIMAForecaster, ForecastResult, ProphetFor
 logger = get_logger(__name__)
 
 
-def _get_llm() -> ChatAnthropic:
-    settings = get_settings()
-    return ChatAnthropic(
-        model=settings.llm_model,
-        temperature=settings.llm_temperature,
-        api_key=settings.anthropic_api_key.get_secret_value(),
-    )
+def _get_llm() -> BaseChatModel:
+    # El adjudicador / reconciliación final = juicio de alto valor → tier 'judge'
+    return get_chat_model("judge")
 
 
 # ---------------------------------------------------------------------------

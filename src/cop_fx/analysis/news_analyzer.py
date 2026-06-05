@@ -7,10 +7,9 @@ from cop_fx.logger import get_logger
 from dataclasses import dataclass
 from typing import Any
 
-from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
-from cop_fx.config.settings import get_settings
+from cop_fx.llm import get_chat_model
 from cop_fx.data.news_fetcher import Article
 
 logger = get_logger(__name__)
@@ -40,12 +39,8 @@ class NewsAnalyzer:
     """Uses Claude to classify articles and estimate their FX impact."""
 
     def __init__(self) -> None:
-        settings = get_settings()
-        self._llm = ChatAnthropic(
-            model=settings.llm_model,
-            temperature=0.0,
-            api_key=settings.anthropic_api_key.get_secret_value(),
-        )
+        # Clasificar por noticia = alto volumen → tier barato ('fast')
+        self._llm = get_chat_model("fast", temperature=0.0)
 
     def analyze_batch(self, articles: list[Article]) -> list[AnalyzedArticle]:
         """Classify a batch of articles in a single LLM call."""

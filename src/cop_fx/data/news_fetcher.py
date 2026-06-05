@@ -1,4 +1,4 @@
-"""Fetch economic news via RSS feeds and NewsAPI."""
+"""Fetch economic news via RSS feeds, NewsAPI, and CNN Español Colombia."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import feedparser
 import httpx
 
 from cop_fx.config.settings import get_settings
+from cop_fx.data.cnn_fetcher import CNNColombiaFetcher, CNNArticle
 
 logger = get_logger(__name__)
 
@@ -21,6 +22,7 @@ class Article:
     url: str
     published_at: datetime
     source: str
+    author: str = ""
     tags: list[str] = field(default_factory=list)
 
 
@@ -35,6 +37,7 @@ class NewsFetcher:
         articles.extend(self._fetch_rss())
         if self._settings.newsapi_key:
             articles.extend(self._fetch_newsapi(self._settings.newsapi_key.get_secret_value()))
+        articles.extend(self._fetch_cnn())
 
         # deduplicate by url
         seen: set[str] = set()
@@ -46,8 +49,30 @@ class NewsFetcher:
 
         unique.sort(key=lambda a: a.published_at, reverse=True)
         result = unique[: self._settings.news_max_articles]
-        logger.info("Fetched %d unique articles", len(result))
+        logger.success("Fetched %d unique articles total", len(result))  # type: ignore[attr-defined]
         return result
+
+    def _fetch_cnn(self) -> list[Article]:
+        """Fetch articles from CNN Español Colombia and convert to Article."""
+        try:
+            cnn_articles: list[CNNArticle] = CNNColombiaFetcher(
+                max_articles=self._settings.news_max_articles
+            ).fetch()
+            return [
+                Article(
+                    title=a.title,
+                    summary=a.summary,
+                    url=a.url,
+                    published_at=a.published_at,
+                    source=a.source,
+                    author=a.author,
+                    tags=a.tags,
+                )
+                for a in cnn_articles
+            ]
+        except Exception as exc:  # noqa: BLE001
+            logger.error("CNNColombiaFetcher failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     # RSS

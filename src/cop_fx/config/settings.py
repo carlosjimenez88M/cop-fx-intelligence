@@ -20,9 +20,15 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # LLM
     # ------------------------------------------------------------------
-    anthropic_api_key: SecretStr = Field(..., description="Anthropic Claude API key")
-    openai_api_key: SecretStr | None = Field(None, description="OpenAI API key (fallback)")
-    llm_model: str = Field("claude-sonnet-4-6", description="Default LLM model ID")
+    llm_provider: Literal["openai", "anthropic"] = Field(
+        "openai", description="Proveedor de LLM activo"
+    )
+    openai_api_key: SecretStr | None = Field(None, description="OpenAI API key")
+    anthropic_api_key: SecretStr | None = Field(None, description="Anthropic API key (opcional)")
+    # tier 'fast' — alto volumen, barato (clasificar/extraer por noticia)
+    llm_model: str = Field("gpt-4o-mini", description="Modelo barato para volumen")
+    # tier 'judge' — 1 llamada de alto valor (adjudicador / reconciliación)
+    llm_model_judge: str = Field("gpt-4o", description="Modelo fuerte para el juicio final")
     llm_temperature: float = Field(0.1, ge=0.0, le=1.0)
 
     # ------------------------------------------------------------------
