@@ -43,6 +43,7 @@ dependencies = [
     "transformers>=5.10.2",
     "pyarrow>=24.0.0",
     "networkx>=3.6.1",
+    "streamlit>=1.58.0",
 ]
 
 [project.optional-dependencies]
@@ -120,3 +121,10 @@ omit = ["*/__init__.py"]
 
 [tool.coverage.report]
 fail_under = 50
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "nbconvert>=7.17.1",
+    "nbformat>=5.10.4",
+]
