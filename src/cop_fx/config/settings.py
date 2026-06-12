@@ -8,10 +8,14 @@ from typing import Literal
 from pydantic import Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from cop_fx.paths import ENV_FILE, REPORTS_DIR
+
 
 class Settings(BaseSettings):
+    # env_file ABSOLUTO (cop_fx.paths): funciona sin importar el cwd —
+    # notebooks, dashboard, CLI y tests leen el mismo .env de la raíz.
     model_config = SettingsConfigDict(
-        env_file=".env",
+        env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
@@ -75,7 +79,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     environment: Literal["development", "staging", "production"] = Field("development")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field("INFO")
-    report_output_dir: str = Field("reports", description="Local dir for generated reports")
+    report_output_dir: str = Field(
+        default=str(REPORTS_DIR), description="Dir absoluto para los reportes generados"
+    )
     forecast_horizon_days: int = Field(7, ge=1, le=30)
 
     @field_validator("llm_model")

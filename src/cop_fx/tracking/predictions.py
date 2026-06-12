@@ -16,6 +16,7 @@ from typing import TYPE_CHECKING, Any
 
 from cop_fx.contracts import DirectionalCall
 from cop_fx.logger import get_logger
+from cop_fx.paths import DATA_DIR
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -53,8 +54,9 @@ CREATE TABLE IF NOT EXISTS predictions (
 class PredictionStore:
     """Persistencia SQLite de los DirectionalCall diarios + su evaluación."""
 
-    def __init__(self, db_path: str | Path = "data/predictions.db") -> None:
-        self._db_path = Path(db_path)
+    def __init__(self, db_path: str | Path | None = None) -> None:
+        # Default absoluto (cop_fx.paths): independiente del cwd.
+        self._db_path = Path(db_path) if db_path is not None else DATA_DIR / "predictions.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.execute(_SCHEMA)

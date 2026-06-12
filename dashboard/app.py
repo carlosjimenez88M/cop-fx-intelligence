@@ -12,29 +12,21 @@ arquitectura LangGraph y el backtesting de la Etapa 5.
 from __future__ import annotations
 
 import json
-import os
 import sqlite3
-import sys
-from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 
-ROOT = Path(__file__).resolve().parents[1]
-os.chdir(ROOT)  # los paths del pipeline (reports/, data/) son relativos a la raíz
-sys.path.insert(0, str(ROOT / "src"))
-
-from dotenv import load_dotenv  # noqa: E402
-
-load_dotenv(ROOT / ".env")
-
-from cop_fx.tracking import PredictionStore, directional_backtest  # noqa: E402
+# Sin os.chdir ni hacks de cwd: cop_fx.paths resuelve todo desde el paquete,
+# y Settings lee el .env de la raíz con ruta absoluta.
+from cop_fx.paths import DATA_DIR
+from cop_fx.tracking import PredictionStore, directional_backtest
 
 st.set_page_config(page_title="COP/USD Intelligence", page_icon="💵", layout="wide")
 
-ARTICLES_DB = ROOT / "data" / "cnn_articles.db"
-PREDICTIONS_DB = ROOT / "data" / "predictions.db"
+ARTICLES_DB = DATA_DIR / "cnn_articles.db"
+PREDICTIONS_DB = DATA_DIR / "predictions.db"
 
 DIRECTION_LABEL = {
     "down": "⬇️ USD/COP BAJA (COP se fortalece)",
