@@ -68,12 +68,31 @@ def test_article_analysis_keyword_bounds() -> None:
     with pytest.raises(ValidationError):
         ArticleAnalysis(
             index=0,
-            topic="macro",
+            topic="us_global_macro",
             keywords=[],  # min_length=1
+            fx_relevance="direct",
+            fx_channel="growth",
             severity="low",
             bullish_cop=False,
             reasoning="x",
         )
+
+
+@pytest.mark.unit()
+def test_no_relevance_forces_no_channel_and_low_severity() -> None:
+    # Coherencia por contrato: un partido de fútbol no puede tener canal FX.
+    sports = ArticleAnalysis(
+        index=0,
+        topic="sports",
+        keywords=["fútbol"],
+        fx_relevance="none",
+        fx_channel="inflation",  # incoherente a propósito
+        severity="high",
+        bullish_cop=True,
+        reasoning="r",
+    )
+    assert sports.fx_channel == "none"
+    assert sports.severity == "low"
 
 
 @pytest.mark.unit()
@@ -84,6 +103,9 @@ def test_batch_analysis_parses_llm_dict() -> None:
                 "index": 0,
                 "topic": "monetary_policy",
                 "keywords": ["BanRep", "tasas"],
+                "entities": ["BanRep"],
+                "fx_relevance": "direct",
+                "fx_channel": "interest_rates",
                 "severity": "high",
                 "bullish_cop": True,
                 "reasoning": "Subida de tasas atrae flujos",
@@ -93,27 +115,49 @@ def test_batch_analysis_parses_llm_dict() -> None:
     }
     batch = BatchAnalysis.model_validate(payload)
     assert batch.items[0].topic == "monetary_policy"
+    assert batch.items[0].fx_channel == "interest_rates"
+
+
+def _analysis(
+    i: int,
+    bullish: bool,
+    severity: Severity,
+    relevance: str = "direct",
+) -> ArticleAnalysis:
+    return ArticleAnalysis(
+        index=i,
+        topic="us_global_macro",
+        keywords=["kw"],
+        fx_relevance=relevance,  # type: ignore[arg-type]
+        fx_channel="growth" if relevance != "none" else "none",
+        severity=severity,
+        bullish_cop=bullish,
+        reasoning="r",
+    )
 
 
 @pytest.mark.unit()
 def test_aggregate_news_signal_directions() -> None:
-    def analysis(i: int, bullish: bool, severity: Severity) -> ArticleAnalysis:
-        return ArticleAnalysis(
-            index=i,
-            topic="macro",
-            keywords=["kw"],
-            severity=severity,
-            bullish_cop=bullish,
-            reasoning="r",
-        )
-
-    bullish = [analysis(0, True, "high"), analysis(1, True, "medium")]
+    bullish = [_analysis(0, True, "high"), _analysis(1, True, "medium")]
     signal = aggregate_news_signal(bullish, {0: "Brent sube"})
     assert signal.direction == "down"  # COP fuerte ⇒ USD/COP cae
     assert signal.drivers == ["Brent sube"]
 
-    bearish = [analysis(0, False, "high"), analysis(1, False, "high")]
+    bearish = [_analysis(0, False, "high"), _analysis(1, False, "high")]
     assert aggregate_news_signal(bearish).direction == "up"
 
-    weak = [analysis(0, True, "low")]
+    weak = [_analysis(0, True, "low")]
     assert aggregate_news_signal(weak).direction == "neutral"
+
+
+@pytest.mark.unit()
+def test_aggregate_ignores_irrelevant_and_halves_indirect() -> None:
+    # 10 noticias de deportes (relevance none) no mueven la señal...
+    noise = [_analysis(i, True, "high", relevance="none") for i in range(10)]
+    assert aggregate_news_signal(noise).score == 0.0
+    assert aggregate_news_signal(noise).direction == "neutral"
+
+    # ...y una indirecta pesa la mitad que una directa de igual severidad.
+    direct = aggregate_news_signal([_analysis(0, True, "high", relevance="direct")])
+    indirect = aggregate_news_signal([_analysis(0, True, "high", relevance="indirect")])
+    assert indirect.score == direct.score / 2

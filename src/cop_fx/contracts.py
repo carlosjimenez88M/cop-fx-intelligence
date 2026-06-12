@@ -1,4 +1,4 @@
-"""Contratos Pydantic del grafo de inteligencia (Etapa 0).
+"""Contratos Pydantic del grafo de inteligencia (Etapas 0-3).
 
 Estos modelos son la frontera entre el LLM y el resto del sistema:
 todo lo que un modelo de lenguaje produce entra por `with_structured_output`
@@ -7,9 +7,19 @@ contra uno de estos schemas — nunca por parsing manual de JSON.
 La "racionalidad" del sistema vive aquí, no en los prompts:
   - `DirectionalCall` exige `devils_advocate` (no hay veredicto sin contra-argumento),
   - los validadores acotan `confidence` cuando las señales divergen,
-  - la abstención (`neutral`) es una salida válida forzada por contrato.
+  - la abstención (`neutral`) es una salida válida forzada por contrato,
+  - `fx_relevance="none"` excluye la noticia de la señal por construcción
+    (un partido de fútbol no puede mover el score ni por error de prompt).
 
-Ver docs/plan_maestro.md (Etapa 0) y docs/arquitectura.md §5-6.
+Taxonomía en dos niveles (qué ES la noticia ≠ cómo MUEVE el dólar):
+  - `topic`: el dominio de la noticia (15 categorías, incluye salud pública,
+    medio ambiente/clima, seguridad, deportes...).
+  - `fx_channel`: el MECANISMO de transmisión al USD/COP. Una sequía
+    (environment_climate) transmite por `inflation` (alimentos → BanRep);
+    una epidemia (public_health) por `growth`/`country_risk`. Obligar al
+    modelo a nombrar el canal es lo que separa análisis de opinión.
+
+Ver docs/plan_maestro.md y docs/arquitectura.md §5-6.
 """
 
 from __future__ import annotations
@@ -19,21 +29,45 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 Topic = Literal[
-    "monetary_policy",  # BanRep, tasas, inflación
-    "trade",            # importaciones / exportaciones / balanza
-    "political_risk",   # elecciones, protestas, regulación
-    "commodities",      # petróleo, café, carbón
-    "macro",            # PIB, empleo, déficit fiscal
+    "monetary_policy",      # BanRep, tasas, inflación
+    "fiscal_policy",        # presupuesto, reforma tributaria, déficit, deuda pública
+    "trade",                # exportaciones / importaciones / aranceles / balanza
+    "political_risk",       # elecciones, gobernabilidad, regulación, instituciones
+    "security_conflict",    # orden público, conflicto armado, narcotráfico
+    "energy_commodities",   # petróleo, carbón, gas, minería, energía
+    "agro_commodities",     # café, alimentos, sector agro
+    "public_health",        # epidemias, sistema de salud, crisis sanitarias
+    "environment_climate",  # clima, El Niño/La Niña, desastres, transición energética
+    "labor_social",         # empleo, huelgas, paros, protesta social
+    "financial_markets",    # bolsa, deuda, calificadoras, flujos de portafolio
+    "us_global_macro",      # Fed, dólar global (DXY), economía mundial
+    "sports",               # deportes
+    "culture_society",      # cultura, entretenimiento, sociedad
     "other",
 ]
+
+FxChannel = Literal[
+    "interest_rates",   # diferencial de tasas COP vs USD
+    "inflation",        # presión de precios → respuesta esperada del BanRep
+    "terms_of_trade",   # precio de lo que Colombia exporta/importa
+    "country_risk",     # prima de riesgo, percepción institucional
+    "capital_flows",    # IED, flujos de portafolio, remesas
+    "growth",           # actividad económica / PIB
+    "none",             # sin mecanismo de transmisión al FX
+]
+
+FxRelevance = Literal["direct", "indirect", "none"]
+"""direct = mueve el FX por sí sola · indirect = transmite por un canal de
+segundo orden (clima→inflación, salud→crecimiento) · none = sin canal."""
 
 Severity = Literal["high", "medium", "low"]
 
 Direction = Literal["down", "up", "neutral"]
 """down = USD/COP cae (COP se fortalece) · up = USD/COP sube · neutral = abstención."""
 
-# Pesos para agregar señales de noticias: severity → contribución al score
+# Pesos para agregar señales de noticias
 SEVERITY_WEIGHT: dict[str, float] = {"high": 1.0, "medium": 0.5, "low": 0.2}
+RELEVANCE_WEIGHT: dict[str, float] = {"direct": 1.0, "indirect": 0.5, "none": 0.0}
 
 
 class ArticleAnalysis(BaseModel):
@@ -44,9 +78,32 @@ class ArticleAnalysis(BaseModel):
     keywords: list[str] = Field(
         min_length=1, max_length=5, description="3-5 términos clave en español"
     )
-    severity: Severity = Field(description="Impacto esperado sobre el USD/COP")
+    entities: list[str] = Field(
+        default_factory=list,
+        max_length=5,
+        description="Entidades nombradas (personas, instituciones, empresas, lugares)",
+    )
+    fx_relevance: FxRelevance = Field(
+        description="¿La noticia tiene un canal de transmisión al USD/COP?"
+    )
+    fx_channel: FxChannel = Field(
+        description="El mecanismo por el que la noticia mueve el USD/COP"
+    )
+    severity: Severity = Field(description="Magnitud esperada del impacto sobre el USD/COP")
     bullish_cop: bool = Field(description="True si la noticia tiende a fortalecer el COP")
     reasoning: str = Field(max_length=240, description="≤ 20 palabras justificando el veredicto")
+
+    @model_validator(mode="after")
+    def _coherence(self) -> ArticleAnalysis:
+        # Sin relevancia FX no hay canal ni severidad — coherencia por contrato,
+        # no por cortesía del prompt.
+        if self.fx_relevance == "none":
+            self.fx_channel = "none"
+            self.severity = "low"
+        elif self.fx_channel == "none":
+            self.fx_relevance = "none"
+            self.severity = "low"
+        return self
 
 
 class BatchAnalysis(BaseModel):
@@ -58,11 +115,25 @@ class BatchAnalysis(BaseModel):
     )
 
 
+class HeadlineTag(BaseModel):
+    """Etiqueta gruesa por titular — la produce el gate y siembra el clustering."""
+
+    index: int = Field(ge=0, description="Posición del titular en la lista enviada (0-based)")
+    topic: Topic
+    material: bool = Field(description="¿Este titular en particular puede mover el USD/COP?")
+
+
 class MaterialityGate(BaseModel):
-    """Salida del router inicial (Etapa 2): ¿hay noticia material hoy?"""
+    """Salida del router inicial (Etapa 2): ¿hay noticia material hoy?
+
+    Además del veredicto global, etiqueta cada titular con un tópico grueso:
+    la misma llamada que decide la ruta siembra los clusters del fan-out
+    (Etapa 3) — cero costo adicional.
+    """
 
     has_material_news: bool
     reason: str = Field(max_length=300)
+    tags: list[HeadlineTag] = Field(default_factory=list)
 
 
 class NewsSignal(BaseModel):
@@ -70,7 +141,7 @@ class NewsSignal(BaseModel):
 
     direction: Direction
     score: float = Field(
-        description="Suma de bullish_cop ponderada por severity; > 0 ⇒ COP se fortalece"
+        description="Σ ±(peso_severity × peso_relevance); > 0 ⇒ COP se fortalece"
     )
     drivers: list[str] = Field(
         default_factory=list,
@@ -124,12 +195,16 @@ def aggregate_news_signal(
 ) -> NewsSignal:
     """Agrega veredictos por artículo en una señal direccional — determinista, sin LLM.
 
-    score = Σ (±peso_severity); positivo si bullish_cop. |score| ≤ threshold ⇒ neutral.
+    score = Σ ±(peso_severity × peso_relevance); positivo si bullish_cop.
+    Artículos con fx_relevance="none" pesan 0 por construcción.
+    |score| ≤ threshold ⇒ neutral.
     """
     score = 0.0
     drivers: list[str] = []
     for a in analyses:
-        weight = SEVERITY_WEIGHT[a.severity]
+        weight = SEVERITY_WEIGHT[a.severity] * RELEVANCE_WEIGHT[a.fx_relevance]
+        if weight == 0.0:
+            continue
         score += weight if a.bullish_cop else -weight
         if a.severity == "high" and titles_by_index is not None:
             title = titles_by_index.get(a.index)
