@@ -28,6 +28,7 @@ Colour map
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from typing import Any
 
@@ -101,8 +102,10 @@ _handler: logging.StreamHandler | None = None  # single shared handler
 def _get_handler(stream=sys.stdout) -> logging.StreamHandler:
     global _handler
     if _handler is None:
+        # Colours on by default; set NO_COLOR=1 to disable (POSIX convention).
+        use_colour = "NO_COLOR" not in os.environ
         _handler = logging.StreamHandler(stream)
-        _handler.setFormatter(_ColouredFormatter(use_colour=stream.isatty()))
+        _handler.setFormatter(_ColouredFormatter(use_colour=use_colour))
     return _handler
 
 

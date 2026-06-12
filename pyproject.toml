@@ -27,9 +27,11 @@ dependencies = [
     # Settings / config
     "pydantic-settings>=2.4",
     "pydantic>=2.8",
-    # HTTP / feeds
+    # HTTP / feeds / scraping
     "httpx>=0.27",
     "feedparser>=6.0",
+    "beautifulsoup4>=4.12",
+    "lxml>=5.0",
     # Data manipulation
     "pandas>=2.2",
     "numpy>=1.26",
@@ -37,6 +39,11 @@ dependencies = [
     "python-dotenv>=1.0",
     "tenacity>=8.3",
     "structlog>=24.4",
+    "openai>=2.38.0",
+    "transformers>=5.10.2",
+    "pyarrow>=24.0.0",
+    "networkx>=3.6.1",
+    "streamlit>=1.58.0",
 ]
 
 [project.optional-dependencies]
@@ -114,3 +121,10 @@ omit = ["*/__init__.py"]
 
 [tool.coverage.report]
 fail_under = 50
+
+[dependency-groups]
+dev = [
+    "jupyter>=1.1.1",
+    "nbconvert>=7.17.1",
+    "nbformat>=5.10.4",
+]

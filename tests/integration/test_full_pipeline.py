@@ -2,14 +2,64 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
 from cop_fx.agents.graph import run_pipeline
+from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
+from cop_fx.contracts import AdjudicatorVerdict, HeadlineTag, MaterialityGate, TopStory
 from cop_fx.data.news_fetcher import Article
+
+
+def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> MagicMock:
+    """Mock de get_chat_model que responde según el schema pedido.
+
+    El gate (check_materiality) y el adjudicador comparten la fábrica;
+    with_structured_output(schema) decide qué instancia devolver.
+    `calls` (si se pasa) registra cada schema invocado — permite afirmar
+    cuántas veces se ejecutó cada nodo LLM.
+    """
+    responses: dict[type, object] = {
+        MaterialityGate: MaterialityGate(
+            has_material_news=material,
+            reason="mocked gate",
+            tags=[
+                HeadlineTag(index=0, topic="trade", material=True),
+                HeadlineTag(index=1, topic="energy_commodities", material=True),
+            ],
+        ),
+        TopStory: TopStory(
+            chosen_index=0,
+            why_it_matters="El déficit comercial amplía la presión sobre la cuenta externa.",
+            watch_next="La próxima publicación del DANE.",
+        ),
+        AdjudicatorVerdict: AdjudicatorVerdict(
+            direction="up",
+            confidence=0.65,
+            reconciliation="agree",
+            rationale="Noticias bajistas para el COP y serie al alza.",
+            devils_advocate="Un rebote del Brent revertiría la presión sobre el peso.",
+            caveats=["mock"],
+        ),
+    }
+
+    def _with_structured_output(schema: type, **_: object) -> MagicMock:
+        structured = MagicMock()
+
+        def _invoke(prompt: object) -> object:
+            if calls is not None:
+                calls.append(schema)
+            return responses[schema]
+
+        structured.invoke.side_effect = _invoke
+        return structured
+
+    base_llm = MagicMock()
+    base_llm.with_structured_output.side_effect = _with_structured_output
+    return base_llm
 
 
 @pytest.fixture()
@@ -27,35 +77,70 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
     fake_articles = [
         Article(
             title="Colombia registra déficit comercial",
-            summary="El déficit comercial se amplió en abril según el DANE.",
+            summary=("El déficit comercial se amplió en abril según el DANE, presionado "
+                     "por mayores importaciones de bienes de capital y menores ventas externas."),
             url="https://example.com/news/1",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="El Tiempo",
         ),
         Article(
             title="Petróleo cae 3% por temores de recesión",
-            summary="Los precios del petróleo cayeron presionados por datos económicos de EEUU.",
+            summary=("Los precios del petróleo cayeron más de tres por ciento presionados por "
+                     "débiles datos económicos de Estados Unidos y mayores inventarios de crudo."),
             url="https://example.com/news/2",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="Portafolio",
         ),
     ]
 
-    llm_json = (
-        '[{"index":0,"topic":"trade","severity":"medium","bullish_cop":false,"reasoning":"deficit"},'
-        '{"index":1,"topic":"commodities","severity":"high","bullish_cop":false,"reasoning":"oil drop"}]'
+    mock_analysis = NewsAnalysis(
+        items=[
+            AnalyzedArticle(
+                article=fake_articles[0],
+                topic="trade",
+                severity="medium",
+                bullish_cop=False,
+                reasoning="deficit",
+                keywords=["déficit", "comercio"],
+                entities=["DANE"],
+                fx_relevance="direct",
+                fx_channel="terms_of_trade",
+            ),
+            AnalyzedArticle(
+                article=fake_articles[1],
+                topic="energy_commodities",
+                severity="high",
+                bullish_cop=False,
+                reasoning="oil drop",
+                keywords=["petróleo", "recesión"],
+                entities=["Brent"],
+                fx_relevance="direct",
+                fx_channel="terms_of_trade",
+            ),
+        ],
+        narrative="Peso under pressure from weak commodities and trade deficit.",
     )
-    llm_narrative = "---\nPeso under pressure from weak commodities and trade deficit."
 
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content=llm_json + "\n" + llm_narrative)
-
+    llm_calls: list[type] = []
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
-        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch(
+            "cop_fx.agents.nodes.get_chat_model",
+            return_value=_llm_by_schema(calls=llm_calls),
+        ),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+        patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
+        patch("cop_fx.agents.nodes.attach_bodies"),    # sin red en tests
+        patch(
+            "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
+            side_effect=lambda symbol, lookback_days=30: pd.DataFrame(
+                {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": [100.0, 101.0]}
+            ),
+        ),
     ):
+        MockAnalyzer.return_value.analyze.return_value = mock_analysis
         settings = MagicMock()
         settings.forecast_horizon_days = 5
         settings.report_output_dir = str(tmp_path)
@@ -71,6 +156,21 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
     assert "ensemble_df" in final_state
     assert "tweet_text" in final_state
 
+    # Etapa 4: el veredicto direccional llega completo al estado final
+    call = final_state.get("directional_call", {})
+    assert call.get("direction") in ("down", "up", "neutral")
+    assert call.get("ts_signal", {}).get("direction") in ("down", "up", "neutral")
+    assert "Directional Call" in final_state["report_markdown"]
+
+    # El agente editor eligió la noticia del día y llegó al reporte
+    top = final_state.get("top_story", {})
+    assert top.get("title")
+    assert "Noticia del día" in final_state["report_markdown"]
+
+    # Regresión: el adjudicador (nodo deferred) debe ejecutarse EXACTAMENTE
+    # una vez — un trigger extra hacia un nodo deferred lo dispara dos veces.
+    assert llm_calls.count(AdjudicatorVerdict) == 1, f"adjudicate ran {llm_calls.count(AdjudicatorVerdict)}x"
+
     # No catastrophic errors
     errors = final_state.get("errors", [])
     assert errors == [], f"Pipeline errors: {errors}"
@@ -84,15 +184,24 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
 
 @pytest.mark.integration()
 def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content='[]\n---\nNo news to analyze.')
-
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
-        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch("cop_fx.agents.nodes.get_chat_model", return_value=_llm_by_schema()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+        patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
+        patch("cop_fx.agents.nodes.attach_bodies"),    # sin red en tests
+        patch(
+            "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
+            side_effect=lambda symbol, lookback_days=30: pd.DataFrame(
+                {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": [100.0, 101.0]}
+            ),
+        ),
     ):
+        MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
+            items=[], narrative="No news to analyze."
+        )
         settings = MagicMock()
         settings.forecast_horizon_days = 3
         settings.report_output_dir = str(tmp_path)

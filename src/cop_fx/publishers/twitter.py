@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
-
 from cop_fx.config.settings import get_settings
+from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
 

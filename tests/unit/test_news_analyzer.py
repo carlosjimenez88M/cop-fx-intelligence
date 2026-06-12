@@ -2,29 +2,36 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
+from cop_fx.contracts import ArticleAnalysis, BatchAnalysis
 from cop_fx.data.news_fetcher import Article
 
 
 @pytest.fixture()
 def sample_articles() -> list[Article]:
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     return [
         Article(
             title="BanRep sube tasa de interés 50 pb",
-            summary="El Banco de la República aumentó su tasa de referencia ante presiones inflacionarias.",
+            summary=(
+                "El Banco de la República aumentó su tasa de referencia "
+                "ante presiones inflacionarias."
+            ),
             url="https://example.com/1",
             published_at=now,
             source="Portafolio",
         ),
         Article(
             title="Exportaciones de café aumentan 12% en mayo",
-            summary="Colombia exportó 1.2 millones de sacos en mayo, impulsado por precios internacionales.",
+            summary=(
+                "Colombia exportó 1.2 millones de sacos en mayo, "
+                "impulsado por precios internacionales."
+            ),
             url="https://example.com/2",
             published_at=now,
             source="El Tiempo",
@@ -37,6 +44,55 @@ def sample_articles() -> list[Article]:
             source="Semana",
         ),
     ]
+
+
+def _analyzer_with(structured_llm: MagicMock) -> NewsAnalyzer:
+    """Build a NewsAnalyzer whose structured LLM is mocked."""
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+    with patch("cop_fx.analysis.news_analyzer.get_chat_model", return_value=base_llm):
+        return NewsAnalyzer()
+
+
+def _batch_for_three() -> BatchAnalysis:
+    return BatchAnalysis(
+        items=[
+            ArticleAnalysis(
+                index=0,
+                topic="monetary_policy",
+                keywords=["BanRep", "tasas", "inflación"],
+                entities=["BanRep"],
+                fx_relevance="direct",
+                fx_channel="interest_rates",
+                severity="high",
+                bullish_cop=True,
+                reasoning="Rate hike supports peso",
+            ),
+            ArticleAnalysis(
+                index=1,
+                topic="agro_commodities",
+                keywords=["café", "exportaciones"],
+                entities=["Federación de Cafeteros"],
+                fx_relevance="direct",
+                fx_channel="terms_of_trade",
+                severity="medium",
+                bullish_cop=True,
+                reasoning="Coffee export boost",
+            ),
+            ArticleAnalysis(
+                index=2,
+                topic="labor_social",
+                keywords=["protesta", "puertos"],
+                entities=["Buenaventura"],
+                fx_relevance="indirect",
+                fx_channel="country_risk",
+                severity="high",
+                bullish_cop=False,
+                reasoning="Port blockade",
+            ),
+        ],
+        market_narrative="El peso se fortalece pese al riesgo político en los puertos.",
+    )
 
 
 @pytest.mark.unit()
@@ -59,66 +115,66 @@ def test_fallback_detects_high_severity_keywords(sample_articles: list[Article])
 
 
 @pytest.mark.unit()
-def test_analyze_batch_returns_analyzed_articles(sample_articles: list[Article]) -> None:
-    llm_response_json = """[
-        {"index": 0, "topic": "monetary_policy", "severity": "high", "bullish_cop": true, "reasoning": "Rate hike supports peso"},
-        {"index": 1, "topic": "commodities", "severity": "medium", "bullish_cop": true, "reasoning": "Coffee export boost"},
-        {"index": 2, "topic": "political_risk", "severity": "high", "bullish_cop": false, "reasoning": "Port blockade"}
-    ]"""
+def test_analyze_returns_structured_verdicts(sample_articles: list[Article]) -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = _batch_for_three()
 
-    mock_response = MagicMock()
-    mock_response.content = llm_response_json
+    analyzer = _analyzer_with(structured_llm)
+    analysis = analyzer.analyze(sample_articles)
 
-    with patch("cop_fx.analysis.news_analyzer.get_settings") as mock_settings:
-        settings = MagicMock()
-        settings.llm_model = "claude-sonnet-4-6"
-        settings.llm_temperature = 0.0
-        settings.anthropic_api_key.get_secret_value.return_value = "test-key"
-        mock_settings.return_value = settings
-
-        with patch("cop_fx.analysis.news_analyzer.ChatAnthropic") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.invoke.return_value = mock_response
-            MockLLM.return_value = mock_llm_instance
-
-            analyzer = NewsAnalyzer()
-            result = analyzer.analyze_batch(sample_articles)
-
-    assert len(result) == 3
-    assert result[0].topic == "monetary_policy"
-    assert result[0].severity == "high"
-    assert result[0].bullish_cop is True
-    assert result[2].bullish_cop is False
+    assert len(analysis.items) == 3
+    assert analysis.items[0].topic == "monetary_policy"
+    assert analysis.items[0].severity == "high"
+    assert analysis.items[0].bullish_cop is True
+    assert analysis.items[0].keywords == ["BanRep", "tasas", "inflación"]
+    assert analysis.items[2].bullish_cop is False
+    assert "peso" in analysis.narrative
 
 
 @pytest.mark.unit()
-def test_analyze_batch_empty_input() -> None:
-    with patch("cop_fx.analysis.news_analyzer.get_settings"):
-        with patch("cop_fx.analysis.news_analyzer.ChatAnthropic"):
-            analyzer = NewsAnalyzer()
-            result = analyzer.analyze_batch([])
-    assert result == []
+def test_analyze_batch_keeps_legacy_signature(sample_articles: list[Article]) -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = _batch_for_three()
+
+    analyzer = _analyzer_with(structured_llm)
+    result = analyzer.analyze_batch(sample_articles)
+
+    assert isinstance(result, list)
+    assert all(isinstance(item, AnalyzedArticle) for item in result)
 
 
 @pytest.mark.unit()
-def test_analyze_batch_falls_back_on_invalid_json(sample_articles: list[Article]) -> None:
-    mock_response = MagicMock()
-    mock_response.content = "not valid json at all {{{"
+def test_analyze_empty_input() -> None:
+    analyzer = _analyzer_with(MagicMock())
+    analysis = analyzer.analyze([])
+    assert analysis.items == []
+    assert "No news" in analysis.narrative
 
-    with patch("cop_fx.analysis.news_analyzer.get_settings") as mock_settings:
-        settings = MagicMock()
-        settings.llm_model = "claude-sonnet-4-6"
-        settings.llm_temperature = 0.0
-        settings.anthropic_api_key.get_secret_value.return_value = "test-key"
-        mock_settings.return_value = settings
 
-        with patch("cop_fx.analysis.news_analyzer.ChatAnthropic") as MockLLM:
-            mock_llm_instance = MagicMock()
-            mock_llm_instance.invoke.return_value = mock_response
-            MockLLM.return_value = mock_llm_instance
+@pytest.mark.unit()
+def test_analyze_falls_back_on_llm_error(sample_articles: list[Article]) -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("api down")
 
-            analyzer = NewsAnalyzer()
-            result = analyzer.analyze_batch(sample_articles)
+    analyzer = _analyzer_with(structured_llm)
+    analysis = analyzer.analyze(sample_articles)
 
     # Should return fallback results (one per article)
-    assert len(result) == len(sample_articles)
+    assert len(analysis.items) == len(sample_articles)
+    assert all(item.reasoning.startswith("fallback") for item in analysis.items)
+
+
+@pytest.mark.unit()
+def test_analyze_fills_missing_indices_with_fallback(sample_articles: list[Article]) -> None:
+    incomplete = BatchAnalysis(
+        items=_batch_for_three().items[:2],  # LLM omitted article 2
+        market_narrative="Narrativa parcial.",
+    )
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = incomplete
+
+    analyzer = _analyzer_with(structured_llm)
+    analysis = analyzer.analyze(sample_articles)
+
+    assert len(analysis.items) == 3
+    assert analysis.items[2].reasoning.startswith("fallback")

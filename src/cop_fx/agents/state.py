@@ -2,13 +2,21 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 import pandas as pd
 
 from cop_fx.data.news_fetcher import Article
 from cop_fx.timeseries.evaluator import EvalMetrics
 from cop_fx.timeseries.models import ForecastResult
+
+
+class TopicWorkerState(TypedDict):
+    """Payload que viaja en cada `Send` hacia un topic_worker (Etapa 3)."""
+
+    cluster_topic: str
+    cluster_articles: list[Article]
 
 
 class PipelineState(TypedDict, total=False):
@@ -23,8 +31,23 @@ class PipelineState(TypedDict, total=False):
 
     # ── News ──────────────────────────────────────────────────────────
     raw_articles: list[Article]
-    analyzed_articles: list[dict[str, Any]]  # enriched with topic/severity
+    has_material_news: bool         # veredicto del router (Etapa 2)
+    materiality_reason: str
+    headline_tags: list[dict[str, Any]]      # tags gruesos del gate (siembran clusters)
+    clusters: dict[str, list[int]]           # topic → índices en raw_articles
+    # Reducers: N topic_workers (Send) escriben en el mismo paso — operator.add
+    # concatena sus aportes en vez de chocar.
+    worker_analyses: Annotated[list[dict[str, Any]], operator.add]
+    cluster_narratives: Annotated[list[str], operator.add]
+    analyzed_articles: list[dict[str, Any]]  # consolidado por aggregate_signals
+    news_signal: dict[str, Any]              # NewsSignal serializado (para el adjudicador)
+    top_story: dict[str, Any]                # la noticia del día (agente editor)
     news_summary: str               # LLM-generated summary
+
+    # ── Adjudicación (Etapa 4) ────────────────────────────────────────
+    ts_signal: dict[str, Any]                # TimeSeriesSignal serializado
+    market_signal: dict[str, Any]            # MarketSignal serializado (contexto)
+    directional_call: dict[str, Any]         # DirectionalCall serializado
 
     # ── Forecast ──────────────────────────────────────────────────────
     prophet_result: ForecastResult
@@ -39,5 +62,7 @@ class PipelineState(TypedDict, total=False):
     tweet_id: str | None            # set after publishing
 
     # ── Control ───────────────────────────────────────────────────────
-    errors: list[str]
+    # Reducer: ramas paralelas (fetch_fx / fetch_news) pueden aportar
+    # errores en el mismo paso — operator.add los concatena en vez de chocar.
+    errors: Annotated[list[str], operator.add]
     publish_enabled: bool

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from prophet import Prophet
 from statsmodels.tsa.arima.model import ARIMA
+
+from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -64,6 +65,9 @@ class ProphetForecaster:
 class ARIMAForecaster:
     """Wrapper around statsmodels ARIMA with auto-order fallback."""
 
+    # Orden por defecto respaldado por evidencia (notebooks/series_de_tiempo.ipynb):
+    # gana por BIC, deja residuales ruido-blanco (Ljung-Box p=1.0) y supera al
+    # ganador por AIC (2,1,3) en hit-rate direccional out-of-sample (52% vs 35%).
     def __init__(self, order: tuple[int, int, int] = (2, 1, 2)) -> None:
         self._order = order
 
@@ -72,7 +76,7 @@ class ARIMAForecaster:
 
         try:
             result = ARIMA(series, order=self._order).fit()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("ARIMA(%s) failed (%s), retrying with (1,1,1)", self._order, exc)
             result = ARIMA(series, order=(1, 1, 1)).fit()
 

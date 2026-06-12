@@ -1,17 +1,45 @@
-"""Fetch economic news via RSS feeds and NewsAPI."""
+"""Fetch economic news via RSS feeds, NewsAPI, and CNN Español Colombia."""
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import feedparser
 import httpx
+from bs4 import BeautifulSoup
 
 from cop_fx.config.settings import get_settings
+from cop_fx.data.cnn_fetcher import CNNArticle, CNNColombiaFetcher
+from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def order_articles(articles: list[Article]) -> list[Article]:
+    """Mismo día = mismo pie.
+
+    Ordena por FECHA (no hora) descendente y, dentro de cada día, intercala
+    las fuentes (round-robin). Sin esto, las fuentes con timestamp fino
+    (RSS con hora exacta) monopolizan el tope y las que traen solo fecha
+    (CNN a medianoche) quedan siempre al fondo — aunque sean del mismo día
+    y pesen igual sobre la tendencia del dólar.
+    """
+    from itertools import groupby
+
+    by_date = sorted(articles, key=lambda a: a.published_at.date(), reverse=True)
+    ordered: list[Article] = []
+    for _, day_group in groupby(by_date, key=lambda a: a.published_at.date()):
+        queues: dict[str, list[Article]] = {}
+        for article in day_group:
+            queues.setdefault(article.source, []).append(article)
+        rotation = list(queues.values())
+        while rotation:
+            for queue in rotation[:]:
+                ordered.append(queue.pop(0))
+                if not queue:
+                    rotation.remove(queue)
+    return ordered
 
 
 @dataclass
@@ -21,7 +49,11 @@ class Article:
     url: str
     published_at: datetime
     source: str
+    author: str = ""
     tags: list[str] = field(default_factory=list)
+    # Cuerpo COMPLETO del artículo — lo adjunta attach_bodies() para los
+    # artículos materiales. Los veredictos se hacen sobre esto, no el titular.
+    body: str = ""
 
 
 class NewsFetcher:
@@ -35,6 +67,7 @@ class NewsFetcher:
         articles.extend(self._fetch_rss())
         if self._settings.newsapi_key:
             articles.extend(self._fetch_newsapi(self._settings.newsapi_key.get_secret_value()))
+        articles.extend(self._fetch_cnn())
 
         # deduplicate by url
         seen: set[str] = set()
@@ -44,10 +77,31 @@ class NewsFetcher:
                 seen.add(a.url)
                 unique.append(a)
 
-        unique.sort(key=lambda a: a.published_at, reverse=True)
-        result = unique[: self._settings.news_max_articles]
-        logger.info("Fetched %d unique articles", len(result))
+        result = order_articles(unique)[: self._settings.news_max_articles]
+        logger.success("Fetched %d unique articles total", len(result))  # type: ignore[attr-defined]
         return result
+
+    def _fetch_cnn(self) -> list[Article]:
+        """Fetch articles from CNN Español Colombia and convert to Article."""
+        try:
+            cnn_articles: list[CNNArticle] = CNNColombiaFetcher(
+                max_articles=self._settings.news_max_articles
+            ).fetch()
+            return [
+                Article(
+                    title=a.title,
+                    summary=a.summary,
+                    url=a.url,
+                    published_at=a.published_at,
+                    source=a.source,
+                    author=a.author,
+                    tags=a.tags,
+                )
+                for a in cnn_articles
+            ]
+        except Exception as exc:
+            logger.error("CNNColombiaFetcher failed: %s", exc)
+            return []
 
     # ------------------------------------------------------------------
     # RSS
@@ -60,26 +114,28 @@ class NewsFetcher:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries:
                     published = self._parse_rss_date(entry)
+                    # Los summaries RSS suelen traer HTML — al LLM le llega texto
+                    raw_summary = entry.get("summary", "")
+                    summary = BeautifulSoup(raw_summary, "lxml").get_text(" ", strip=True)
                     articles.append(
                         Article(
                             title=entry.get("title", ""),
-                            summary=entry.get("summary", ""),
+                            summary=summary,
                             url=entry.get("link", ""),
                             published_at=published,
                             source=feed.feed.get("title", feed_url),
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("RSS feed %s failed: %s", feed_url, exc)
         return articles
 
     @staticmethod
     def _parse_rss_date(entry: feedparser.FeedParserDict) -> datetime:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
-            import time
 
-            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        return datetime.now(tz=timezone.utc)
+            return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+        return datetime.now(tz=UTC)
 
     # ------------------------------------------------------------------
     # NewsAPI
@@ -98,7 +154,7 @@ class NewsFetcher:
                 resp = client.get("https://newsapi.org/v2/everything", params=params)
                 resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("NewsAPI failed: %s", exc)
             return []
 
@@ -109,7 +165,7 @@ class NewsFetcher:
                     item["publishedAt"].replace("Z", "+00:00")
                 )
             except (KeyError, ValueError):
-                published = datetime.now(tz=timezone.utc)
+                published = datetime.now(tz=UTC)
             articles.append(
                 Article(
                     title=item.get("title") or "",
