@@ -1,0 +1,42 @@
+# ============================================================
+# cop-fx-intelligence — configuración operativa (UN solo lugar)
+#
+# Los SECRETOS (API keys, tokens) viven en .env — aquí va todo lo demás.
+# Precedencia: variable de entorno > .env > este archivo > defaults del código.
+# ============================================================
+
+# ── LLM ──────────────────────────────────────────────────────
+llm_provider: openai
+llm_model: gpt-5.4-mini          # tier 'fast': clasificación por lote (alto volumen)
+llm_model_judge: gpt-5.4-mini    # tier 'judge': el adjudicador (1 llamada de alto valor)
+llm_temperature: 0.0             # clasificación direccional = determinismo
+
+# ── Noticias ─────────────────────────────────────────────────
+news_max_articles: 100           # artículos a traer por corrida
+gate_headlines_cap: 60           # titulares que evalúa el gate de materialidad
+min_analyzable_chars: 80         # sin cuerpo ni summary de este tamaño → se descarta
+news_rss_feeds:
+  # Lado COP: economía colombiana
+  - https://feeds.eltiempo.com/rss/economia
+  - https://www.portafolio.co/rss/economia.xml
+  - https://feeds.semana.com/negocios
+  - https://rss.app/feeds/economia-colombia.xml
+  # Lado USD: macro global / Fed
+  - https://www.cnbc.com/id/20910258/device/rss/rss.html
+
+# ── Agentes ──────────────────────────────────────────────────
+max_topic_workers: 6             # cota del fan-out (Send) — controla costo
+ts_neutral_band_pct: 0.10        # |Δ%| del forecast bajo esto = la serie se abstiene
+market_dead_band_pct: 0.30       # movimiento del equity bajo esto = sin sesgo de mercado
+
+# ── FX / forecast ────────────────────────────────────────────
+fx_base_currency: USD
+fx_quote_currency: COP
+fx_lookback_days: 365
+forecast_horizon_days: 7
+
+# ── App ──────────────────────────────────────────────────────
+environment: development
+log_level: INFO
+report_output_dir: reports       # relativo = se resuelve contra la raíz del repo
+twitter_enabled: false

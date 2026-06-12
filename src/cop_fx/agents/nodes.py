@@ -42,14 +42,14 @@ from cop_fx.tracking.predictions import PredictionStore
 
 logger = get_logger(__name__)
 
-# Cota superior de workers por corrida: controla el costo en días muy noticiosos.
-MAX_TOPIC_WORKERS = 6
-
-# Banda muerta del forecast: |Δ%| menor a esto = la serie no opina (neutral).
-TS_NEUTRAL_BAND_PCT = 0.10
-
-# Banda muerta del equity: un movimiento bursátil menor a esto no opina.
-MARKET_DEAD_BAND_PCT = 0.30
+# Knobs operativos — viven en config.yaml (raíz), no aquí. Estos alias de
+# módulo existen para legibilidad de los nodos y de los tests.
+_cfg = get_settings()
+MAX_TOPIC_WORKERS = _cfg.max_topic_workers
+TS_NEUTRAL_BAND_PCT = _cfg.ts_neutral_band_pct
+MARKET_DEAD_BAND_PCT = _cfg.market_dead_band_pct
+GATE_HEADLINES_CAP = _cfg.gate_headlines_cap
+MIN_ANALYZABLE_CHARS = _cfg.min_analyzable_chars
 
 
 # ---------------------------------------------------------------------------
@@ -178,7 +178,7 @@ def check_materiality(state: PipelineState) -> PipelineState:
             "headline_tags": [],
         }
 
-    digest = "\n".join(f"[{i}] {a.title}" for i, a in enumerate(articles[:30]))
+    digest = "\n".join(f"[{i}] {a.title}" for i, a in enumerate(articles[:GATE_HEADLINES_CAP]))
     try:
         llm = get_chat_model("fast", temperature=0.0).with_structured_output(MaterialityGate)
         raw = llm.invoke(_MATERIALITY_PROMPT.format(digest=digest))
@@ -250,7 +250,7 @@ def orchestrate(state: PipelineState) -> PipelineState:
 
     tag_by_index = {t["index"]: t for t in tags}
     clusters: dict[str, list[int]] = {}
-    for i in range(min(len(articles), 30)):
+    for i in range(min(len(articles), GATE_HEADLINES_CAP)):
         tag = tag_by_index.get(i)
         if tag is not None and not tag.get("material", True):
             continue  # el gate ya dijo que este titular no mueve el FX
@@ -258,7 +258,7 @@ def orchestrate(state: PipelineState) -> PipelineState:
         clusters.setdefault(topic, []).append(i)
 
     if not clusters:  # gate material pero sin tags utilizables → un solo cluster
-        clusters = {"other": list(range(min(len(articles), 30)))}
+        clusters = {"other": list(range(min(len(articles), GATE_HEADLINES_CAP)))}
 
     if len(clusters) > MAX_TOPIC_WORKERS:
         by_size = sorted(clusters.items(), key=lambda kv: len(kv[1]), reverse=True)
@@ -307,9 +307,22 @@ def topic_worker(state: TopicWorkerState) -> PipelineState:
 
     # El veredicto se hace sobre la NOTICIA COMPLETA: el gate ya filtró por
     # titular (barato); aquí — solo para los artículos materiales — se
-    # descarga el cuerpo antes de analizar.
+    # descarga el cuerpo antes de analizar. Sin texto analizable (ni cuerpo
+    # ni summary decente) el artículo NO aporta nada y se descarta.
     attach_bodies(articles)
-    analysis = NewsAnalyzer().analyze(articles)
+    readable = [
+        a for a in articles
+        if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
+    ]
+    if len(readable) < len(articles):
+        logger.info(
+            "topic_worker[%s]: %d artículos sin texto analizable descartados",
+            topic, len(articles) - len(readable),
+        )
+    if not readable:
+        return {"worker_analyses": [], "cluster_narratives": []}
+
+    analysis = NewsAnalyzer().analyze(readable)
     logger.info("topic_worker[%s]: %d artículos analizados", topic, len(analysis.items))
     return {
         "worker_analyses": [_analysis_to_dict(item) for item in analysis.items],
@@ -364,8 +377,15 @@ def analyze_news(state: PipelineState) -> PipelineState:
     if not articles:
         return {"analyzed_articles": [], "news_summary": "No news available."}
 
-    attach_bodies(articles[:20])  # veredictos sobre la noticia completa
-    analysis = NewsAnalyzer().analyze(articles[:20])
+    pool = articles[:30]
+    attach_bodies(pool)  # veredictos sobre la noticia completa
+    readable = [
+        a for a in pool
+        if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
+    ][:20]
+    if not readable:
+        return {"analyzed_articles": [], "news_summary": "No analyzable news today."}
+    analysis = NewsAnalyzer().analyze(readable)
     analyzed = [_analysis_to_dict(item) for item in analysis.items]
     return {"analyzed_articles": analyzed, "news_summary": analysis.narrative}
 

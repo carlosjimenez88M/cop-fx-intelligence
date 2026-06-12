@@ -100,7 +100,7 @@ def test_fetch_news_populates_state() -> None:
 def _fake_article(title: str = "BanRep sube tasas") -> Article:
     return Article(
         title=title,
-        summary="resumen",
+        summary="El Banco de la República ajustó su tasa de referencia ante presiones inflacionarias persistentes en alimentos.",
         url="https://example.com/a",
         published_at=datetime.now(tz=UTC),
         source="Test",
@@ -295,7 +295,7 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
     articles = [
         Article(
             title="BanRep mantiene tasas",
-            summary="Junta directiva decide no mover tasas.",
+            summary="La junta directiva del Banco de la República decidió mantener inalterada su tasa de referencia ante la persistencia inflacionaria.",
             url="https://x.com",
             published_at=datetime.now(tz=UTC),
             source="Portafolio",
@@ -315,7 +315,10 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
     )
     mock_analysis = NewsAnalysis(items=[verdict], narrative="Market is neutral.")
 
-    with patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer:
+    with (
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch("cop_fx.agents.nodes.attach_bodies"),  # sin red en tests
+    ):
         MockAnalyzer.return_value.analyze.return_value = mock_analysis
         result = analyze_news(_base_state(raw_articles=articles))
 

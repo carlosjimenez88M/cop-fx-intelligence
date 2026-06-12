@@ -1,4 +1,4 @@
-"""Application settings loaded from environment variables / .env file."""
+"""Configuración del sistema — config.yaml (operativa) + .env (secretos)."""
 
 from __future__ import annotations
 
@@ -6,20 +6,52 @@ from functools import lru_cache
 from typing import Literal
 
 from pydantic import Field, SecretStr, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
-from cop_fx.paths import ENV_FILE, REPORTS_DIR
+from cop_fx.paths import ENV_FILE, PROJECT_ROOT, REPORTS_DIR
 
 
 class Settings(BaseSettings):
-    # env_file ABSOLUTO (cop_fx.paths): funciona sin importar el cwd —
-    # notebooks, dashboard, CLI y tests leen el mismo .env de la raíz.
+    """Configuración del sistema.
+
+    DOS archivos, responsabilidades separadas:
+      - ``config.yaml`` (raíz): TODA la configuración operativa — modelo,
+        número de artículos, feeds, bandas, workers. Editable sin tocar código.
+      - ``.env`` (raíz): SOLO secretos (API keys, tokens de Twitter).
+
+    Precedencia: env vars > .env > config.yaml > defaults del código.
+    Rutas absolutas vía cop_fx.paths — funciona sin importar el cwd.
+    """
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
+        yaml_file=str(PROJECT_ROOT / "config.yaml"),
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
     )
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            YamlConfigSettingsSource(settings_cls),
+            file_secret_settings,
+        )
 
     # ------------------------------------------------------------------
     # LLM
@@ -27,8 +59,8 @@ class Settings(BaseSettings):
     llm_provider: Literal["openai", "anthropic"] = Field(
         "openai", description="Proveedor de LLM activo"
     )
-    openai_api_key: SecretStr | None = Field(None, description="OpenAI API key")
-    anthropic_api_key: SecretStr | None = Field(None, description="Anthropic API key (opcional)")
+    openai_api_key: SecretStr | None = Field(None, description="OpenAI API key (.env)")
+    anthropic_api_key: SecretStr | None = Field(None, description="Anthropic API key (.env)")
     # tier 'fast' — alto volumen, barato (clasificar/extraer por noticia)
     llm_model: str = Field("gpt-4o-mini", description="Modelo barato para volumen")
     # tier 'judge' — 1 llamada de alto valor (adjudicador / reconciliación)
@@ -39,7 +71,7 @@ class Settings(BaseSettings):
     # FX data
     # ------------------------------------------------------------------
     alpha_vantage_api_key: SecretStr | None = Field(
-        None, description="Alpha Vantage API key for FX data"
+        None, description="Alpha Vantage API key (.env, opcional)"
     )
     fx_base_currency: str = Field("USD", description="Base currency")
     fx_quote_currency: str = Field("COP", description="Quote currency")
@@ -48,20 +80,37 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # News
     # ------------------------------------------------------------------
-    newsapi_key: SecretStr | None = Field(None, description="NewsAPI.org key")
+    newsapi_key: SecretStr | None = Field(None, description="NewsAPI.org key (.env, opcional)")
     news_rss_feeds: list[str] = Field(
         default=[
-            # ── Lado COP: economía colombiana ─────────────────────────
             "https://feeds.eltiempo.com/rss/economia",
             "https://www.portafolio.co/rss/economia.xml",
             "https://feeds.semana.com/negocios",
             "https://rss.app/feeds/economia-colombia.xml",
-            # ── Lado USD: macro global / Fed (el USD/COP es mitad dólar) ──
-            "https://www.cnbc.com/id/20910258/device/rss/rss.html",      # CNBC Economy
+            "https://www.cnbc.com/id/20910258/device/rss/rss.html",
         ],
         description="RSS feeds: economía colombiana (lado COP) + macro global (lado USD)",
     )
-    news_max_articles: int = Field(50, ge=1, le=200)
+    news_max_articles: int = Field(100, ge=1, le=200)
+    gate_headlines_cap: int = Field(
+        60, ge=10, le=200, description="Titulares que evalúa el gate de materialidad"
+    )
+    min_analyzable_chars: int = Field(
+        80, ge=0, description="Sin cuerpo ni summary de este tamaño, el artículo se descarta"
+    )
+
+    # ------------------------------------------------------------------
+    # Agentes
+    # ------------------------------------------------------------------
+    max_topic_workers: int = Field(
+        6, ge=1, le=20, description="Cota del fan-out (Send) — controla el costo"
+    )
+    ts_neutral_band_pct: float = Field(
+        0.10, ge=0.0, description="Banda muerta del forecast (la serie se abstiene)"
+    )
+    market_dead_band_pct: float = Field(
+        0.30, ge=0.0, description="Banda muerta del equity (sin sesgo de mercado)"
+    )
 
     # ------------------------------------------------------------------
     # Twitter / X
@@ -79,7 +128,8 @@ class Settings(BaseSettings):
     environment: Literal["development", "staging", "production"] = Field("development")
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field("INFO")
     report_output_dir: str = Field(
-        default=str(REPORTS_DIR), description="Dir absoluto para los reportes generados"
+        default=str(REPORTS_DIR),
+        description="Dir de reportes; relativo se resuelve contra la raíz",
     )
     forecast_horizon_days: int = Field(7, ge=1, le=30)
 
