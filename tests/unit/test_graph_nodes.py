@@ -11,9 +11,11 @@ from langgraph.types import Send
 
 from cop_fx.agents.nodes import (
     MAX_TOPIC_WORKERS,
+    adjudicate,
     aggregate_signals,
     analyze_news,
     check_materiality,
+    compute_ts_signal,
     fan_out_clusters,
     fetch_fx,
     fetch_news,
@@ -318,6 +320,137 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
     assert analyzed[0]["topic"] == "monetary_policy"
     assert analyzed[0]["keywords"] == ["BanRep", "tasas"]
     assert result.get("news_summary") == "Market is neutral."
+
+
+# ── Etapa 4: compute_ts_signal / adjudicate ──────────────────────────────
+
+def _ensemble_df(latest: float, yhat_final: float) -> pd.DataFrame:
+    return pd.DataFrame(
+        {
+            "ds": pd.date_range("2024-06-03", periods=3, freq="B"),
+            "yhat": [latest, (latest + yhat_final) / 2, yhat_final],
+            "yhat_lower": [latest - 20] * 3,
+            "yhat_upper": [latest + 20] * 3,
+        }
+    )
+
+
+@pytest.mark.unit()
+def test_compute_ts_signal_directions() -> None:
+    up = compute_ts_signal(
+        latest=4000.0,
+        ensemble_df=_ensemble_df(4000.0, 4080.0),  # +2%
+        prophet_result=None,
+        arima_result=None,
+    )
+    assert up.direction == "up"
+    assert up.models_agree is False  # un solo modelo (o ninguno) nunca "concuerda"
+
+    flat = compute_ts_signal(
+        latest=4000.0,
+        ensemble_df=_ensemble_df(4000.0, 4001.0),  # +0.025% < banda muerta
+        prophet_result=None,
+        arima_result=None,
+    )
+    assert flat.direction == "neutral"
+
+
+def _news(direction: str, score: float) -> dict:
+    return {"direction": direction, "score": score, "drivers": ["BanRep sube tasas"]}
+
+
+def _ts(direction: str, delta: float) -> dict:
+    return {"direction": direction, "yhat_delta_pct": delta, "models_agree": True}
+
+
+@pytest.mark.unit()
+def test_adjudicate_uses_judge_verdict() -> None:
+    from cop_fx.contracts import AdjudicatorVerdict
+
+    verdict = AdjudicatorVerdict(
+        direction="down",
+        confidence=0.72,
+        reconciliation="agree",
+        rationale="Noticias y serie apuntan a COP fuerte por tasas.",
+        devils_advocate="El DXY podría repuntar tras el dato de empleo en EE.UU.",
+        caveats=["Fuente única (CNN)"],
+    )
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = verdict
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = adjudicate(
+            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("down", -0.5))
+        )
+
+    call = result["directional_call"]
+    assert call["direction"] == "down"
+    assert call["confidence"] == 0.72
+    assert call["news_signal"]["score"] == 2.0      # inyectado por el sistema
+    assert call["ts_signal"]["yhat_delta_pct"] == -0.5
+
+
+@pytest.mark.unit()
+def test_adjudicate_divergence_cap_applies_to_llm_output() -> None:
+    from cop_fx.contracts import AdjudicatorVerdict
+
+    overconfident = AdjudicatorVerdict(
+        direction="up",
+        confidence=0.95,                 # el LLM exagera...
+        reconciliation="diverge",        # ...en plena divergencia
+        rationale="r",
+        devils_advocate="Las noticias apuntan exactamente en la dirección contraria.",
+        caveats=[],
+    )
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = overconfident
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = adjudicate(
+            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8))
+        )
+
+    assert result["directional_call"]["confidence"] == 0.5  # acotado por contrato
+
+
+@pytest.mark.unit()
+def test_adjudicate_falls_back_deterministically() -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("api down")
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        agree = adjudicate(
+            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("down", -0.5))
+        )["directional_call"]
+        diverge = adjudicate(
+            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8))
+        )["directional_call"]
+        partial = adjudicate(
+            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("neutral", 0.0))
+        )["directional_call"]
+
+    assert (agree["direction"], agree["confidence"]) == ("down", 0.6)
+    assert (diverge["direction"], diverge["confidence"]) == ("neutral", 0.3)
+    assert (partial["direction"], partial["reconciliation"]) == ("down", "partial")
+
+
+@pytest.mark.unit()
+def test_adjudicate_without_signals_abstains() -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("api down")
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        call = adjudicate(_base_state())["directional_call"]
+
+    assert call["direction"] == "neutral"
 
 
 # ── generate_report ───────────────────────────────────────────────────────

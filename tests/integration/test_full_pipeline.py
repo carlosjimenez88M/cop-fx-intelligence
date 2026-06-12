@@ -10,23 +10,50 @@ import pytest
 
 from cop_fx.agents.graph import run_pipeline
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
-from cop_fx.contracts import HeadlineTag, MaterialityGate
+from cop_fx.contracts import AdjudicatorVerdict, HeadlineTag, MaterialityGate
 from cop_fx.data.news_fetcher import Article
 
 
-def _material_gate_llm(material: bool = True) -> MagicMock:
-    """Mock de get_chat_model para el nodo check_materiality."""
-    structured_llm = MagicMock()
-    structured_llm.invoke.return_value = MaterialityGate(
-        has_material_news=material,
-        reason="mocked gate",
-        tags=[
-            HeadlineTag(index=0, topic="trade", material=True),
-            HeadlineTag(index=1, topic="energy_commodities", material=True),
-        ],
-    )
+def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> MagicMock:
+    """Mock de get_chat_model que responde según el schema pedido.
+
+    El gate (check_materiality) y el adjudicador comparten la fábrica;
+    with_structured_output(schema) decide qué instancia devolver.
+    `calls` (si se pasa) registra cada schema invocado — permite afirmar
+    cuántas veces se ejecutó cada nodo LLM.
+    """
+    responses: dict[type, object] = {
+        MaterialityGate: MaterialityGate(
+            has_material_news=material,
+            reason="mocked gate",
+            tags=[
+                HeadlineTag(index=0, topic="trade", material=True),
+                HeadlineTag(index=1, topic="energy_commodities", material=True),
+            ],
+        ),
+        AdjudicatorVerdict: AdjudicatorVerdict(
+            direction="up",
+            confidence=0.65,
+            reconciliation="agree",
+            rationale="Noticias bajistas para el COP y serie al alza.",
+            devils_advocate="Un rebote del Brent revertiría la presión sobre el peso.",
+            caveats=["mock"],
+        ),
+    }
+
+    def _with_structured_output(schema: type, **_: object) -> MagicMock:
+        structured = MagicMock()
+
+        def _invoke(prompt: object) -> object:
+            if calls is not None:
+                calls.append(schema)
+            return responses[schema]
+
+        structured.invoke.side_effect = _invoke
+        return structured
+
     base_llm = MagicMock()
-    base_llm.with_structured_output.return_value = structured_llm
+    base_llm.with_structured_output.side_effect = _with_structured_output
     return base_llm
 
 
@@ -87,11 +114,15 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
         narrative="Peso under pressure from weak commodities and trade deficit.",
     )
 
+    llm_calls: list[type] = []
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
         patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
-        patch("cop_fx.agents.nodes.get_chat_model", return_value=_material_gate_llm()),
+        patch(
+            "cop_fx.agents.nodes.get_chat_model",
+            return_value=_llm_by_schema(calls=llm_calls),
+        ),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
         MockAnalyzer.return_value.analyze.return_value = mock_analysis
@@ -110,6 +141,16 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
     assert "ensemble_df" in final_state
     assert "tweet_text" in final_state
 
+    # Etapa 4: el veredicto direccional llega completo al estado final
+    call = final_state.get("directional_call", {})
+    assert call.get("direction") in ("down", "up", "neutral")
+    assert call.get("ts_signal", {}).get("direction") in ("down", "up", "neutral")
+    assert "Directional Call" in final_state["report_markdown"]
+
+    # Regresión: el adjudicador (nodo deferred) debe ejecutarse EXACTAMENTE
+    # una vez — un trigger extra hacia un nodo deferred lo dispara dos veces.
+    assert llm_calls.count(AdjudicatorVerdict) == 1, f"adjudicate ran {llm_calls.count(AdjudicatorVerdict)}x"
+
     # No catastrophic errors
     errors = final_state.get("errors", [])
     assert errors == [], f"Pipeline errors: {errors}"
@@ -127,7 +168,7 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
         patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
-        patch("cop_fx.agents.nodes.get_chat_model", return_value=_material_gate_llm()),
+        patch("cop_fx.agents.nodes.get_chat_model", return_value=_llm_by_schema()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(

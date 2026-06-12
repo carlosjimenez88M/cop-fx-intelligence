@@ -43,6 +43,10 @@ class PipelineState(TypedDict, total=False):
     news_signal: dict[str, Any]              # NewsSignal serializado (para el adjudicador)
     news_summary: str               # LLM-generated summary
 
+    # ── Adjudicación (Etapa 4) ────────────────────────────────────────
+    ts_signal: dict[str, Any]                # TimeSeriesSignal serializado
+    directional_call: dict[str, Any]         # DirectionalCall serializado
+
     # ── Forecast ──────────────────────────────────────────────────────
     prophet_result: ForecastResult
     arima_result: ForecastResult

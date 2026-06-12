@@ -7,6 +7,7 @@ from datetime import date
 from langgraph.graph import END, START, StateGraph
 
 from cop_fx.agents.nodes import (
+    adjudicate,
     aggregate_signals,
     check_materiality,
     fan_out_clusters,
@@ -32,7 +33,7 @@ def build_graph() -> StateGraph:
 
     ::
 
-        START ─┬─► fetch_fx ──► run_forecast ───────────────────────────┐
+        START ─┬─► fetch_fx ──► run_forecast (+ ts_signal) ─────────────┐
                └─► fetch_news ─► check_materiality ─(router)─┐          │
                                    │ material                ▼          │
                                    ▼                     skip_news      │
@@ -41,18 +42,22 @@ def build_graph() -> StateGraph:
                                    ▼                         │          │
                           topic_worker (dinámicos)           │          │
                                    ▼                         ▼          ▼
-                            aggregate_signals ────► generate_report (defer)
+                            aggregate_signals ─────────► adjudicate (defer)
                                                              │
-                                                          publish ─► END
+                                              generate_report ─► publish ─► END
 
-    Dos mecanismos de LangGraph trabajando juntos:
+    Mecanismos de LangGraph trabajando juntos:
       - `Send` (orchestrator-workers): la cantidad de workers varía cada
         día con los clusters de noticias — un grafo estático no puede.
         Todos los Sends corren en el MISMO superstep; aggregate_signals
         se dispara una sola vez cuando todos terminan.
-      - `defer=True` en generate_report: las ramas FX y noticias tienen
-        longitudes distintas (y la de noticias es dinámica); defer espera
-        a que no quede trabajo pendiente antes de generar el reporte.
+      - `defer=True` en adjudicate + UN SOLO trigger entrante (el final de
+        la rama de noticias). run_forecast NO tiene arista hacia adjudicate
+        a propósito: un trigger extra hace que el nodo deferred se ejecute
+        una vez por trigger (verificado empíricamente — defer no retiene
+        cuando lo único pendiente son tasks de Send). Con un solo trigger,
+        defer se limita a esperar a que la rama FX termine de escribir
+        ts_signal en el estado antes de emitir el veredicto.
     """
     graph = StateGraph(PipelineState)
 
@@ -65,7 +70,8 @@ def build_graph() -> StateGraph:
     graph.add_node("topic_worker", topic_worker)
     graph.add_node("aggregate_signals", aggregate_signals)
     graph.add_node("run_forecast", run_forecast)
-    graph.add_node("generate_report", generate_report, defer=True)
+    graph.add_node("adjudicate", adjudicate, defer=True)
+    graph.add_node("generate_report", generate_report)
     graph.add_node("publish", publish)
 
     # Parallel fetch branches
@@ -85,10 +91,11 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges("orchestrate", fan_out_clusters, ["topic_worker"])
     graph.add_edge("topic_worker", "aggregate_signals")
 
-    # Convergence
-    graph.add_edge("aggregate_signals", "generate_report")
-    graph.add_edge("skip_news", "generate_report")
-    graph.add_edge("run_forecast", "generate_report")
+    # Etapa 4: convergencia en el adjudicador → reporte → publicación
+    # (sin arista run_forecast→adjudicate: ver nota sobre defer en el docstring)
+    graph.add_edge("aggregate_signals", "adjudicate")
+    graph.add_edge("skip_news", "adjudicate")
+    graph.add_edge("adjudicate", "generate_report")
     graph.add_edge("generate_report", "publish")
     graph.add_edge("publish", END)
 

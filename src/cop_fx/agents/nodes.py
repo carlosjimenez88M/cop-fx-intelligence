@@ -4,13 +4,25 @@ from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from langgraph.types import Send
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 from cop_fx.agents.state import PipelineState, TopicWorkerState
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
 from cop_fx.config.settings import get_settings
-from cop_fx.contracts import ArticleAnalysis, MaterialityGate, aggregate_news_signal
+from cop_fx.contracts import (
+    AdjudicatorVerdict,
+    ArticleAnalysis,
+    DirectionalCall,
+    MaterialityGate,
+    NewsSignal,
+    TimeSeriesSignal,
+    aggregate_news_signal,
+)
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
@@ -27,6 +39,9 @@ logger = get_logger(__name__)
 
 # Cota superior de workers por corrida: controla el costo en días muy noticiosos.
 MAX_TOPIC_WORKERS = 6
+
+# Banda muerta del forecast: |Δ%| menor a esto = la serie no opina (neutral).
+TS_NEUTRAL_BAND_PCT = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -344,12 +359,187 @@ def run_forecast(state: PipelineState) -> PipelineState:
     updates: PipelineState = {
         "ensemble_df": ensemble,
         "eval_metrics": eval_metrics,
+        "ts_signal": compute_ts_signal(
+            latest=float(df["y"].iloc[-1]),
+            ensemble_df=ensemble,
+            prophet_result=prophet_result,
+            arima_result=arima_result,
+        ).model_dump(),
     }
     if prophet_result:
         updates["prophet_result"] = prophet_result
     if arima_result:
         updates["arima_result"] = arima_result
     return updates
+
+
+def compute_ts_signal(
+    *,
+    latest: float,
+    ensemble_df: pd.DataFrame,
+    prophet_result: ForecastResult | None,
+    arima_result: ForecastResult | None,
+) -> TimeSeriesSignal:
+    """Señal direccional del forecast — determinista, cero LLM.
+
+    Solo importa el SIGNO del Δ entre el yhat final del ensemble y el último
+    valor real; dentro de la banda muerta la serie se abstiene. `models_agree`
+    exige que Prophet y ARIMA apunten al mismo lado (con uno solo, False).
+    """
+    yhat_final = float(ensemble_df["yhat"].iloc[-1])
+    delta_pct = (yhat_final - latest) / latest * 100
+
+    if delta_pct > TS_NEUTRAL_BAND_PCT:
+        direction = "up"
+    elif delta_pct < -TS_NEUTRAL_BAND_PCT:
+        direction = "down"
+    else:
+        direction = "neutral"
+
+    def _sign(result: ForecastResult | None) -> int:
+        if result is None:
+            return 0
+        delta = float(result.forecast["yhat"].iloc[-1]) - latest
+        return 1 if delta > 0 else -1
+
+    models_agree = (
+        prophet_result is not None
+        and arima_result is not None
+        and _sign(prophet_result) == _sign(arima_result)
+    )
+    return TimeSeriesSignal(
+        direction=direction,  # type: ignore[arg-type]
+        yhat_delta_pct=round(delta_pct, 3),
+        models_agree=models_agree,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Node: adjudicate  (Etapa 4 — la capa de racionalidad)
+# ---------------------------------------------------------------------------
+
+_ADJUDICATOR_PROMPT = """You are the adjudicator of a Colombian FX intelligence system.
+You must reconcile two INDEPENDENT signals about the USD/COP direction for
+the next {horizon} days and produce a single, honestly-calibrated verdict.
+
+NEWS SIGNAL (aggregated from today's analyzed articles, weighted by
+severity x FX-relevance; score > 0 means COP strengthens => USD/COP DOWN):
+{news_signal}
+
+Cluster narratives:
+{narratives}
+
+TIME-SERIES SIGNAL (Prophet+ARIMA ensemble, deterministic sign):
+{ts_signal}
+
+Current rate: 1 USD = {latest:,.2f} COP ({change:+.2f}% vs 30 days ago).
+
+Rules of reasoning — in this order:
+1. State whether the signals agree, diverge, or one abstains (partial),
+   BEFORE choosing a direction.
+2. If they diverge, explain which signal should dominate and WHY (e.g. a
+   high-severity news shock can override a mild technical trend; a strong
+   trend can override weak, low-relevance news).
+3. devils_advocate: build the STRONGEST case against your chosen direction.
+   If you cannot rebut it convincingly, lower your confidence.
+4. Calibrate: divergence caps confidence at 0.5 (enforced by code);
+   confidence below 0.35 turns the call neutral (enforced). Abstaining
+   (neutral) is a valid, professional answer — never fake conviction.
+5. rationale must cite the specific drivers/headlines and the forecast sign.
+6. caveats: data gaps, single-source bias, stale articles, model disagreement.
+7. Write rationale, devils_advocate and caveats in SPANISH.
+"""
+
+
+def _fallback_call(
+    news: NewsSignal, ts: TimeSeriesSignal, horizon: int
+) -> DirectionalCall:
+    """Reconciliación determinista cuando el adjudicador LLM no está disponible."""
+    if news.direction == ts.direction:
+        reconciliation, direction = "agree", news.direction
+        confidence = 0.6 if news.direction != "neutral" else 0.4
+    elif "neutral" in (news.direction, ts.direction):
+        reconciliation = "partial"
+        direction = news.direction if ts.direction == "neutral" else ts.direction
+        confidence = 0.45
+    else:
+        reconciliation, direction, confidence = "diverge", "neutral", 0.3
+
+    return DirectionalCall(
+        direction=direction,
+        confidence=confidence,
+        horizon_days=horizon,
+        news_signal=news,
+        ts_signal=ts,
+        reconciliation=reconciliation,  # type: ignore[arg-type]
+        rationale=(
+            f"Fallback determinista: noticias={news.direction} (score {news.score}), "
+            f"serie={ts.direction} ({ts.yhat_delta_pct:+.2f}%)."
+        ),
+        devils_advocate=(
+            "Sin adjudicador LLM el contra-argumento no fue explorado; "
+            "tratar este veredicto con cautela adicional."
+        ),
+        caveats=["Adjudicador LLM no disponible — reconciliación por reglas fijas."],
+    )
+
+
+def adjudicate(state: PipelineState) -> PipelineState:
+    """Cruza la señal de noticias contra la de la serie → DirectionalCall.
+
+    El LLM (tier 'judge') produce solo el veredicto (AdjudicatorVerdict);
+    las señales y el horizonte los inyecta el sistema al componer el
+    DirectionalCall, cuyos validadores acotan la confianza y fuerzan la
+    abstención. El LLM juzga; el código gobierna.
+    """
+    horizon = state.get("horizon_days", get_settings().forecast_horizon_days)
+    raw_news = state.get("news_signal")
+    news = (
+        NewsSignal.model_validate(raw_news)
+        if raw_news
+        else NewsSignal(direction="neutral", score=0.0, drivers=[])
+    )
+    raw_ts = state.get("ts_signal")
+    ts = (
+        TimeSeriesSignal.model_validate(raw_ts)
+        if raw_ts
+        else TimeSeriesSignal(direction="neutral", yhat_delta_pct=0.0, models_agree=False)
+    )
+
+    prompt = _ADJUDICATOR_PROMPT.format(
+        horizon=horizon,
+        news_signal=news.model_dump_json(),
+        narratives=state.get("news_summary", "(no narratives)"),
+        ts_signal=ts.model_dump_json(),
+        latest=state.get("latest_rate", 0.0),
+        change=state.get("rate_change_pct", 0.0),
+    )
+
+    try:
+        llm = get_chat_model("judge", temperature=0.0).with_structured_output(
+            AdjudicatorVerdict
+        )
+        raw = llm.invoke(prompt)
+        verdict = (
+            raw if isinstance(raw, AdjudicatorVerdict) else AdjudicatorVerdict.model_validate(raw)
+        )
+        call = DirectionalCall(
+            horizon_days=horizon,
+            news_signal=news,
+            ts_signal=ts,
+            **verdict.model_dump(),
+        )
+    except Exception as exc:
+        logger.warning("adjudicate LLM failed (%s) — deterministic fallback", exc)
+        call = _fallback_call(news, ts, horizon)
+
+    logger.info(
+        "DirectionalCall: %s (confianza=%.2f, reconciliación=%s)",
+        call.direction,
+        call.confidence,
+        call.reconciliation,
+    )
+    return {"directional_call": call.model_dump()}
 
 
 # ---------------------------------------------------------------------------
@@ -382,13 +572,42 @@ def generate_report(state: PipelineState) -> PipelineState:
     for m in state.get("eval_metrics", []):
         metrics_section += f"- **{m.model_name.upper()}**: MAE={m.mae:.2f}, RMSE={m.rmse:.2f}, MAPE={m.mape:.2f}%\n"
 
+    call = state.get("directional_call")
+    call_emoji = ""
+    verdict_section = ""
+    if call:
+        labels = {
+            "down": "⬇️ USD/COP BAJA (COP se fortalece)",
+            "up": "⬆️ USD/COP SUBE (COP se debilita)",
+            "neutral": "⏸️ NEUTRAL — el sistema se abstiene",
+        }
+        call_emoji = {"down": "⬇️", "up": "⬆️", "neutral": "⏸️"}[call["direction"]]
+        drivers = "".join(f"\n- {d}" for d in call["news_signal"]["drivers"])
+        caveats = "".join(f"\n- {c}" for c in call["caveats"])
+        verdict_section = f"""## Directional Call — {call["horizon_days"]} días
+**{labels[call["direction"]]}** · confianza **{call["confidence"]:.2f}** · reconciliación **{call["reconciliation"]}**
+
+Señales: noticias = {call["news_signal"]["direction"]} (score {call["news_signal"]["score"]}) · \
+serie = {call["ts_signal"]["direction"]} ({call["ts_signal"]["yhat_delta_pct"]:+.2f}%, \
+modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
+
+**Racional:** {call["rationale"]}
+
+**Abogado del diablo:** {call["devils_advocate"]}
+
+**Drivers:**{drivers or " (sin drivers de alta severidad)"}
+
+**Caveats:**{caveats or " N/A"}
+
+"""
+
     trend_emoji = "📈" if change > 0 else "📉"
     report = f"""# COP/USD Intelligence Report — {run_date}
 
 ## Current Rate
 **1 USD = {latest:,.2f} COP** {trend_emoji} ({change:+.2f}% vs 30 days ago)
 
-## Market Narrative
+{verdict_section}## Market Narrative
 {narrative}
 
 ## {get_settings().forecast_horizon_days}-Day Forecast
@@ -408,10 +627,17 @@ def generate_report(state: PipelineState) -> PipelineState:
     Path(report_path).write_text(report, encoding="utf-8")
 
     # Craft tweet (≤280 chars)
+    call_line = ""
+    if call:
+        call_line = (
+            f"{call_emoji} Señal {call['horizon_days']}d: {call['direction'].upper()} "
+            f"(confianza {call['confidence']:.0%})\n"
+        )
     tweet = (
         f"COP/USD — {run_date}\n"
         f"💵 1 USD = {latest:,.0f} COP ({change:+.1f}% 30d)\n"
-        f"{narrative[:120]}...\n"
+        f"{call_line}"
+        f"{narrative[:100]}...\n"
         f"#COP #Dólar #Colombia"
     )[:280]
 

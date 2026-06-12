@@ -157,6 +157,26 @@ class TimeSeriesSignal(BaseModel):
     models_agree: bool = Field(description="¿Prophet y ARIMA dan el mismo signo?")
 
 
+class AdjudicatorVerdict(BaseModel):
+    """Lo que el LLM adjudicador produce — y NADA más.
+
+    Las señales (`news_signal`, `ts_signal`) y el horizonte los aporta el
+    sistema al componer el `DirectionalCall`: el modelo juzga, no inventa
+    números. Separar el veredicto del contrato final es lo que impide que
+    el LLM "corrija" un score que no le gustó.
+    """
+
+    direction: Direction
+    confidence: float = Field(ge=0.0, le=1.0)
+    reconciliation: Literal["agree", "diverge", "partial"]
+    rationale: str = Field(description="Cadena de razonamiento que cita los drivers")
+    devils_advocate: str = Field(
+        min_length=20,
+        description="El contra-argumento MÁS FUERTE contra la dirección elegida",
+    )
+    caveats: list[str] = Field(default_factory=list)
+
+
 class DirectionalCall(BaseModel):
     """Producto final diario: el veredicto direccional del adjudicador.
 
