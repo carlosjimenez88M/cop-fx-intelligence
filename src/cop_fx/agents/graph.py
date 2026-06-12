@@ -16,6 +16,7 @@ from cop_fx.agents.nodes import (
     generate_report,
     orchestrate,
     publish,
+    record_prediction,
     route_materiality,
     run_forecast,
     skip_news,
@@ -72,6 +73,7 @@ def build_graph() -> StateGraph:
     graph.add_node("run_forecast", run_forecast)
     graph.add_node("adjudicate", adjudicate, defer=True)
     graph.add_node("generate_report", generate_report)
+    graph.add_node("record_prediction", record_prediction)
     graph.add_node("publish", publish)
 
     # Parallel fetch branches
@@ -96,7 +98,8 @@ def build_graph() -> StateGraph:
     graph.add_edge("aggregate_signals", "adjudicate")
     graph.add_edge("skip_news", "adjudicate")
     graph.add_edge("adjudicate", "generate_report")
-    graph.add_edge("generate_report", "publish")
+    graph.add_edge("generate_report", "record_prediction")
+    graph.add_edge("record_prediction", "publish")
     graph.add_edge("publish", END)
 
     return graph

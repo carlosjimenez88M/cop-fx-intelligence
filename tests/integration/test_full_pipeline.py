@@ -124,6 +124,7 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
             return_value=_llm_by_schema(calls=llm_calls),
         ),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+        patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
     ):
         MockAnalyzer.return_value.analyze.return_value = mock_analysis
         settings = MagicMock()
@@ -170,6 +171,7 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
         patch("cop_fx.agents.nodes.get_chat_model", return_value=_llm_by_schema()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
+        patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
     ):
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
             items=[], narrative="No news to analyze."

@@ -28,6 +28,7 @@ from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
 from cop_fx.logger import get_logger
 from cop_fx.timeseries.evaluator import evaluate
+from cop_fx.tracking.predictions import PredictionStore
 from cop_fx.timeseries.models import (
     ARIMAForecaster,
     ForecastResult,
@@ -540,6 +541,39 @@ def adjudicate(state: PipelineState) -> PipelineState:
         call.reconciliation,
     )
     return {"directional_call": call.model_dump()}
+
+
+# ---------------------------------------------------------------------------
+# Node: record_prediction  (Etapa 5 — cerrar el loop predicción → realidad)
+# ---------------------------------------------------------------------------
+
+def record_prediction(state: PipelineState) -> PipelineState:
+    """Persiste el DirectionalCall del día y evalúa predicciones pendientes.
+
+    La evaluación usa el fx_df fresco de ESTA corrida: cada día nuevo
+    trae la TRM que permite calificar las predicciones cuyo horizonte
+    ya venció. Así el backtesting real se acumula solo, sin jobs extra.
+    """
+    call_dict = state.get("directional_call")
+    if not call_dict:
+        return {}
+
+    try:
+        store = PredictionStore()
+        call = DirectionalCall.model_validate(call_dict)
+        latest = state.get("latest_rate")
+        store.save(
+            call,
+            run_date=state.get("run_date", date.today().isoformat()),
+            latest_rate=float(latest) if latest else None,  # type: ignore[arg-type]
+        )
+        fx_df = state.get("fx_df")
+        if fx_df is not None and not fx_df.empty:
+            store.evaluate_pending(fx_df)
+    except Exception as exc:
+        logger.error("record_prediction failed: %s", exc)
+        return {"errors": [f"record_prediction: {exc}"]}
+    return {}
 
 
 # ---------------------------------------------------------------------------
