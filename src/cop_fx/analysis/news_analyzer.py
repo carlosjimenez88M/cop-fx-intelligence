@@ -41,8 +41,13 @@ class NewsAnalysis:
 
 _PROMPT_TEMPLATE = """You are a Colombian FX market analyst.
 
-Classify each article. The taxonomy has TWO levels — what the news IS
-(`topic`) and HOW it transmits to the USD/COP rate (`fx_channel`):
+Each item below contains the article TITLE and its full TEXT (when a body
+could not be retrieved you will see "(solo titular disponible)" — be more
+conservative with severity in that case).
+
+Classify each article based on its FULL TEXT. The taxonomy has TWO levels —
+what the news IS (`topic`) and HOW it transmits to the USD/COP rate
+(`fx_channel`):
   - index: the 0-based position of the article in the list below
   - topic: the article's domain (sports and culture stories exist in the
     taxonomy — do NOT force them into economic categories)
@@ -77,8 +82,14 @@ class NewsAnalyzer:
         if not articles:
             return NewsAnalysis(items=[], narrative="No news available.")
 
-        digest = "\n".join(
-            f"[{i}] title={a.title!r} summary={a.summary[:300]!r}"
+        # El veredicto se hace sobre la NOTICIA, no el titular: body completo
+        # cuando está disponible (attach_bodies), summary como respaldo.
+        def _text(a: Article) -> str:
+            full = getattr(a, "body", "") or a.summary
+            return full[:1800] if full else "(solo titular disponible)"
+
+        digest = "\n\n".join(
+            f"[{i}] TITLE: {a.title}\nTEXT: {_text(a)}"
             for i, a in enumerate(articles)
         )
 

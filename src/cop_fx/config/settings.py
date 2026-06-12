@@ -58,7 +58,6 @@ class Settings(BaseSettings):
             "https://rss.app/feeds/economia-colombia.xml",
             # ── Lado USD: macro global / Fed (el USD/COP es mitad dólar) ──
             "https://www.cnbc.com/id/20910258/device/rss/rss.html",      # CNBC Economy
-            "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch
         ],
         description="RSS feeds: economía colombiana (lado COP) + macro global (lado USD)",
     )

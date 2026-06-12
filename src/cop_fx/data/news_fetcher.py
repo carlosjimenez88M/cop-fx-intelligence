@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 import feedparser
 import httpx
+from bs4 import BeautifulSoup
 
 from cop_fx.config.settings import get_settings
 from cop_fx.data.cnn_fetcher import CNNArticle, CNNColombiaFetcher
@@ -24,6 +25,9 @@ class Article:
     source: str
     author: str = ""
     tags: list[str] = field(default_factory=list)
+    # Cuerpo COMPLETO del artículo — lo adjunta attach_bodies() para los
+    # artículos materiales. Los veredictos se hacen sobre esto, no el titular.
+    body: str = ""
 
 
 class NewsFetcher:
@@ -85,10 +89,13 @@ class NewsFetcher:
                 feed = feedparser.parse(feed_url)
                 for entry in feed.entries:
                     published = self._parse_rss_date(entry)
+                    # Los summaries RSS suelen traer HTML — al LLM le llega texto
+                    raw_summary = entry.get("summary", "")
+                    summary = BeautifulSoup(raw_summary, "lxml").get_text(" ", strip=True)
                     articles.append(
                         Article(
                             title=entry.get("title", ""),
-                            summary=entry.get("summary", ""),
+                            summary=summary,
                             url=entry.get("link", ""),
                             published_at=published,
                             source=feed.feed.get("title", feed_url),

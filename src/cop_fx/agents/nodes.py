@@ -24,6 +24,7 @@ from cop_fx.contracts import (
     TimeSeriesSignal,
     aggregate_news_signal,
 )
+from cop_fx.data.article_body import attach_bodies
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.market_fetcher import MARKET_SYMBOLS, fetch_yahoo_series
 from cop_fx.data.news_fetcher import NewsFetcher
@@ -304,6 +305,10 @@ def topic_worker(state: TopicWorkerState) -> PipelineState:
     if not articles:
         return {"worker_analyses": [], "cluster_narratives": []}
 
+    # El veredicto se hace sobre la NOTICIA COMPLETA: el gate ya filtró por
+    # titular (barato); aquí — solo para los artículos materiales — se
+    # descarga el cuerpo antes de analizar.
+    attach_bodies(articles)
     analysis = NewsAnalyzer().analyze(articles)
     logger.info("topic_worker[%s]: %d artículos analizados", topic, len(analysis.items))
     return {
@@ -359,6 +364,7 @@ def analyze_news(state: PipelineState) -> PipelineState:
     if not articles:
         return {"analyzed_articles": [], "news_summary": "No news available."}
 
+    attach_bodies(articles[:20])  # veredictos sobre la noticia completa
     analysis = NewsAnalyzer().analyze(articles[:20])
     analyzed = [_analysis_to_dict(item) for item in analysis.items]
     return {"analyzed_articles": analyzed, "news_summary": analysis.narrative}

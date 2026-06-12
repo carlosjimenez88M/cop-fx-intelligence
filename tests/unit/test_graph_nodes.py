@@ -223,7 +223,10 @@ def test_topic_worker_returns_reducer_updates() -> None:
         fx_relevance="direct",
         fx_channel="interest_rates",
     )
-    with patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer:
+    with (
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch("cop_fx.agents.nodes.attach_bodies"),  # sin red en tests
+    ):
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
             items=[verdict], narrative="Peso firme."
         )
