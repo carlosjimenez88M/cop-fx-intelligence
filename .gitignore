@@ -222,3 +222,6 @@ reports/
 
 # Claude Code — keep local AI assistant files out of VCS
 .claude/
+
+# Local data lake (bronze/silver/gold) — datasets live in GCS/BigQuery, not git
+data/
