@@ -469,8 +469,8 @@ def _render_news_lab(articles: pd.DataFrame) -> None:
         f"{material['importance'].mean():.2f}" if not material.empty else "0.00",
     )
     st.caption(
-        "El pipeline trae hasta 100 noticias; GOLD contiene las que pasaron materialidad, "
-        "texto analizable y clasificacion estructurada."
+        f"El pipeline trae hasta {NEWS_LIMIT:,} noticias; GOLD contiene las que pasaron "
+        "materialidad, texto analizable y clasificacion estructurada."
     )
     if material["topic"].nunique() <= 2 and len(material) >= 10:
         st.info(

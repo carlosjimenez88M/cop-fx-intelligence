@@ -12,7 +12,7 @@ llm_model_judge: gpt-5.4-mini    # tier 'judge': el adjudicador (1 llamada de al
 llm_temperature: 0.0             # clasificación direccional = determinismo
 
 # ── Noticias ─────────────────────────────────────────────────
-news_max_articles: 200           # artículos a traer por corrida
+news_max_articles: 100           # artículos a traer por corrida
 gate_headlines_cap: 60           # titulares que evalúa el gate de materialidad
 min_analyzable_chars: 80         # sin cuerpo ni summary de este tamaño → se descarta
 news_rss_feeds:
