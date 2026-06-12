@@ -73,8 +73,7 @@ def test_correlogram_white_noise_mostly_silent(white_noise: pd.Series) -> None:
 
 @pytest.mark.unit()
 def test_select_arima_order_returns_valid_tuple(ar1_series: pd.Series) -> None:
-    df = pd.DataFrame({"ds": pd.date_range("2024-01-01", periods=len(ar1_series)),
-                       "y": ar1_series})
+    df = pd.DataFrame({"ds": pd.date_range("2024-01-01", periods=len(ar1_series)), "y": ar1_series})
     best, table = select_arima_order(df, max_p=2, max_q=2)
     assert len(best) == 3
     assert table["aic"].is_monotonic_increasing
@@ -84,8 +83,7 @@ def test_select_arima_order_returns_valid_tuple(ar1_series: pd.Series) -> None:
 
 @pytest.mark.unit()
 def test_residual_diagnostics_white_noise_after_fit(ar1_series: pd.Series) -> None:
-    df = pd.DataFrame({"ds": pd.date_range("2024-01-01", periods=len(ar1_series)),
-                       "y": ar1_series})
+    df = pd.DataFrame({"ds": pd.date_range("2024-01-01", periods=len(ar1_series)), "y": ar1_series})
     report = residual_diagnostics(df, order=(1, 0, 0))
     # Un AR(1) bien ajustado deja residuales ≈ ruido blanco
     assert report.residuals_autocorrelated is False

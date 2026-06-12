@@ -3,11 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
-import pandas as pd
 
-from cop_fx.timeseries.models import ForecastResult
+if TYPE_CHECKING:
+    import pandas as pd
+
+    from cop_fx.timeseries.models import ForecastResult
+
+
+class Forecaster(Protocol):
+    def fit_predict(self, df: pd.DataFrame, horizon_days: int = 7) -> ForecastResult:
+        """Fit a model and return a forecast."""
+        ...
 
 
 @dataclass
@@ -32,12 +41,10 @@ def evaluate(result: ForecastResult, actuals: pd.DataFrame) -> EvalMetrics:
     """
     merged = result.forecast.merge(actuals, on="ds", how="inner")
     if merged.empty:
-        raise ValueError(
-            f"No overlapping dates between forecast ({result.model_name}) and actuals"
-        )
+        raise ValueError(f"No overlapping dates between forecast ({result.model_name}) and actuals")
 
-    y_true = merged["y"].values
-    y_pred = merged["yhat"].values
+    y_true = merged["y"].to_numpy(dtype=float)
+    y_pred = merged["yhat"].to_numpy(dtype=float)
 
     mae = float(np.mean(np.abs(y_true - y_pred)))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
@@ -55,7 +62,7 @@ def evaluate(result: ForecastResult, actuals: pd.DataFrame) -> EvalMetrics:
 
 def walk_forward_eval(
     df: pd.DataFrame,
-    forecaster,  # ProphetForecaster | ARIMAForecaster
+    forecaster: Forecaster,
     horizon_days: int = 7,
     n_splits: int = 4,
 ) -> list[EvalMetrics]:

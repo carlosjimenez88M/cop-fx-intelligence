@@ -96,6 +96,36 @@ class Settings(BaseSettings):
     min_analyzable_chars: int = Field(
         80, ge=0, description="Sin cuerpo ni summary de este tamaño, el artículo se descarta"
     )
+    keyword_llm_judge_enabled: bool = Field(
+        True, description="Use an LLM to keep only actionable FX terms"
+    )
+    keyword_top_n: int = Field(25, ge=5, le=100)
+    keyword_min_articles: int = Field(1, ge=1, le=20)
+    keyword_pairwise_min_correlation: float = Field(0.20, ge=0.0, le=1.0)
+    keyword_pairwise_min_joint: int = Field(2, ge=1, le=20)
+    keyword_pairwise_top_n: int = Field(80, ge=10, le=500)
+    keyword_domain_stopwords: list[str] = Field(
+        default=[
+            "colombia",
+            "colombiano",
+            "colombiana",
+            "colombianos",
+            "colombianas",
+            "pais",
+            "país",
+            "gobierno",
+            "nacional",
+            "economia",
+            "economía",
+            "mercado",
+            "mercados",
+            "cop",
+            "usd",
+            "dolar",
+            "dólar",
+        ],
+        description="Domain-generic terms removed before keyword ranking and co-occurrence",
+    )
 
     # ------------------------------------------------------------------
     # Agentes
@@ -143,4 +173,4 @@ class Settings(BaseSettings):
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
     """Return cached Settings singleton."""
-    return Settings()
+    return Settings()  # type: ignore[call-arg]

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from cop_fx.config.settings import get_settings
 from cop_fx.logger import get_logger
 
@@ -15,7 +17,7 @@ class TwitterPublisher:
         self._settings = get_settings()
         self._client = self._build_client()
 
-    def _build_client(self):  # type: ignore[return]
+    def _build_client(self) -> Any:
         import tweepy  # deferred so the class can be imported without tweepy installed
 
         s = self._settings
@@ -33,7 +35,9 @@ class TwitterPublisher:
             raise ValueError(f"Missing Twitter credentials: {missing}")
 
         return tweepy.Client(
-            bearer_token=s.twitter_bearer_token.get_secret_value() if s.twitter_bearer_token else None,
+            bearer_token=(
+                s.twitter_bearer_token.get_secret_value() if s.twitter_bearer_token else None
+            ),
             consumer_key=s.twitter_api_key.get_secret_value(),  # type: ignore[union-attr]
             consumer_secret=s.twitter_api_secret.get_secret_value(),  # type: ignore[union-attr]
             access_token=s.twitter_access_token.get_secret_value(),  # type: ignore[union-attr]
@@ -51,13 +55,13 @@ class TwitterPublisher:
             return "dry-run"
 
         resp = self._client.create_tweet(text=text)
-        tweet_id = str(resp.data["id"])  # type: ignore[index]
+        tweet_id = str(resp.data["id"])
         logger.info("Tweet posted: id=%s", tweet_id)
         return tweet_id
 
     def delete(self, tweet_id: str) -> bool:
         """Delete a tweet by ID. Returns True if successful."""
         resp = self._client.delete_tweet(tweet_id)
-        success = bool(resp.data.get("deleted"))  # type: ignore[union-attr]
+        success = bool(resp.data.get("deleted"))
         logger.info("Tweet %s deleted=%s", tweet_id, success)
         return success

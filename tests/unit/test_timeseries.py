@@ -27,6 +27,7 @@ def synthetic_fx_df() -> pd.DataFrame:
 
 # ── Prophet ────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit()
 def test_prophet_returns_correct_horizon(synthetic_fx_df: pd.DataFrame) -> None:
     forecaster = ProphetForecaster()
@@ -45,6 +46,7 @@ def test_prophet_forecast_values_are_positive(synthetic_fx_df: pd.DataFrame) -> 
 
 # ── ARIMA ──────────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit()
 def test_arima_returns_correct_horizon(synthetic_fx_df: pd.DataFrame) -> None:
     result = ARIMAForecaster().fit_predict(synthetic_fx_df, horizon_days=5)
@@ -60,6 +62,7 @@ def test_arima_forecast_confidence_interval_ordering(synthetic_fx_df: pd.DataFra
 
 
 # ── Ensemble ───────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit()
 def test_ensemble_averages_predictions(synthetic_fx_df: pd.DataFrame) -> None:
@@ -81,6 +84,7 @@ def test_ensemble_raises_on_empty_list() -> None:
 
 
 # ── Evaluator ──────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit()
 def test_evaluate_perfect_forecast(synthetic_fx_df: pd.DataFrame) -> None:
@@ -116,9 +120,7 @@ def test_evaluate_no_overlap_raises() -> None:
     actuals = pd.DataFrame(
         {"ds": pd.date_range("2025-01-01", periods=3, freq="D"), "y": [1.0, 2.0, 3.0]}
     )
-    result = ForecastResult(
-        model_name="test", horizon_days=3, forecast=df, train_df=pd.DataFrame()
-    )
+    result = ForecastResult(model_name="test", horizon_days=3, forecast=df, train_df=pd.DataFrame())
     with pytest.raises(ValueError, match="No overlapping dates"):
         evaluate(result, actuals)
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -26,13 +27,17 @@ from cop_fx.agents.nodes import (
     skip_news,
     topic_worker,
 )
-from cop_fx.agents.state import PipelineState
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
 from cop_fx.contracts import MaterialityGate
 from cop_fx.data.news_fetcher import Article
 
+if TYPE_CHECKING:
+    from pathlib import Path
 
-def _base_state(**overrides) -> PipelineState:  # type: ignore[return]
+    from cop_fx.agents.state import PipelineState
+
+
+def _base_state(**overrides: Any) -> PipelineState:
     state: PipelineState = {
         "run_date": "2024-06-01",
         "horizon_days": 3,
@@ -52,6 +57,7 @@ def sample_fx_df() -> pd.DataFrame:
 
 
 # ── fetch_fx ──────────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit()
 def test_fetch_fx_populates_state(sample_fx_df: pd.DataFrame) -> None:
@@ -77,6 +83,7 @@ def test_fetch_fx_captures_errors_on_failure() -> None:
 
 # ── fetch_news ────────────────────────────────────────────────────────────
 
+
 @pytest.mark.unit()
 def test_fetch_news_populates_state() -> None:
     fake_articles = [
@@ -97,10 +104,14 @@ def test_fetch_news_populates_state() -> None:
 
 # ── check_materiality / router / skip_news ───────────────────────────────
 
+
 def _fake_article(title: str = "BanRep sube tasas") -> Article:
     return Article(
         title=title,
-        summary="El Banco de la República ajustó su tasa de referencia ante presiones inflacionarias persistentes en alimentos.",
+        summary=(
+            "El Banco de la República ajustó su tasa de referencia ante "
+            "presiones inflacionarias persistentes en alimentos."
+        ),
         url="https://example.com/a",
         published_at=datetime.now(tz=UTC),
         source="Test",
@@ -158,12 +169,13 @@ def test_skip_news_sets_empty_analysis_with_reason() -> None:
 
 # ── Etapa 3: orchestrate / fan_out / topic_worker / aggregate_signals ────
 
+
 @pytest.mark.unit()
 def test_orchestrate_clusters_by_gate_tags() -> None:
     articles = [_fake_article(f"t{i}") for i in range(4)]
     tags = [
         {"index": 0, "topic": "monetary_policy", "material": True},
-        {"index": 1, "topic": "sports", "material": False},   # descartado
+        {"index": 1, "topic": "sports", "material": False},  # descartado
         {"index": 2, "topic": "monetary_policy", "material": True},
         # índice 3 sin tag → cae en "other"
     ]
@@ -181,9 +193,18 @@ def test_orchestrate_caps_worker_count() -> None:
     tags = [
         {"index": i, "topic": topic, "material": True}
         for i, topic in enumerate(
-            ["monetary_policy", "fiscal_policy", "trade", "political_risk",
-             "security_conflict", "energy_commodities", "agro_commodities",
-             "public_health", "environment_climate", "labor_social"]
+            [
+                "monetary_policy",
+                "fiscal_policy",
+                "trade",
+                "political_risk",
+                "security_conflict",
+                "energy_commodities",
+                "agro_commodities",
+                "public_health",
+                "environment_climate",
+                "labor_social",
+            ]
         )
     ]
     result = orchestrate(_base_state(raw_articles=articles, headline_tags=tags))
@@ -230,9 +251,7 @@ def test_topic_worker_returns_reducer_updates() -> None:
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
             items=[verdict], narrative="Peso firme."
         )
-        result = topic_worker(
-            {"cluster_topic": "monetary_policy", "cluster_articles": [article]}
-        )
+        result = topic_worker({"cluster_topic": "monetary_policy", "cluster_articles": [article]})
 
     assert result["worker_analyses"][0]["fx_channel"] == "interest_rates"
     assert result["cluster_narratives"] == ["[monetary_policy] Peso firme."]
@@ -262,7 +281,7 @@ def test_aggregate_signals_is_deterministic() -> None:
             "fx_relevance": "none",
             "fx_channel": "none",
             "severity": "low",
-            "bullish_cop": True,   # irrelevante: pesa 0
+            "bullish_cop": True,  # irrelevante: pesa 0
             "reasoning": "r",
         },
     ]
@@ -274,14 +293,41 @@ def test_aggregate_signals_is_deterministic() -> None:
     )
 
     signal = result["news_signal"]
-    assert signal["direction"] == "down"      # solo pesa la noticia de tasas
+    assert signal["direction"] == "down"  # solo pesa la noticia de tasas
     assert signal["score"] == 1.0
     assert signal["drivers"] == ["BanRep sube tasas"]
     assert "[monetary_policy]" in result["news_summary"]
     assert len(result["analyzed_articles"]) == 2
 
 
+@pytest.mark.unit()
+def test_aggregate_signals_downgrades_global_noise_without_colombia_scope() -> None:
+    worker_analyses = [
+        {
+            "title": "European retailers report mixed earnings",
+            "url": "https://x.com/global",
+            "topic": "financial_markets",
+            "keywords": ["retail earnings"],
+            "entities": ["Europe"],
+            "fx_relevance": "indirect",
+            "fx_channel": "growth",
+            "severity": "medium",
+            "bullish_cop": False,
+            "reasoning": "Crecimiento europeo sin puente regional accionable.",
+        }
+    ]
+
+    result = aggregate_signals(_base_state(worker_analyses=worker_analyses))
+
+    article = result["analyzed_articles"][0]
+    assert article["fx_relevance"] == "none"
+    assert article["fx_channel"] == "none"
+    assert result["news_signal"]["direction"] == "neutral"
+    assert result["news_signal"]["score"] == 0.0
+
+
 # ── analyze_news ──────────────────────────────────────────────────────────
+
 
 @pytest.mark.unit()
 def test_analyze_news_empty_articles_returns_defaults() -> None:
@@ -291,11 +337,14 @@ def test_analyze_news_empty_articles_returns_defaults() -> None:
 
 
 @pytest.mark.unit()
-def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_analyze_news_uses_analyzer() -> None:
     articles = [
         Article(
             title="BanRep mantiene tasas",
-            summary="La junta directiva del Banco de la República decidió mantener inalterada su tasa de referencia ante la persistencia inflacionaria.",
+            summary=(
+                "La junta directiva del Banco de la República decidió mantener "
+                "inalterada su tasa de referencia ante la persistencia inflacionaria."
+            ),
             url="https://x.com",
             published_at=datetime.now(tz=UTC),
             source="Portafolio",
@@ -331,6 +380,7 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
 
 # ── fetch_market (integración del estudio macro) ─────────────────────────
 
+
 def _market_series(last_two: tuple[float, float]) -> pd.DataFrame:
     return pd.DataFrame(
         {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": list(last_two)}
@@ -341,7 +391,7 @@ def _market_series(last_two: tuple[float, float]) -> pd.DataFrame:
 def test_fetch_market_equity_rule() -> None:
     # bolsa +1% ayer ⇒ COP se fortalece ⇒ USD/COP down
     series = {
-        "GXG": _market_series((30.0, 30.3)),       # +1.0%
+        "GXG": _market_series((30.0, 30.3)),  # +1.0%
         "DX-Y.NYB": _market_series((100.0, 100.1)),
         "BZ=F": _market_series((70.0, 69.0)),
     }
@@ -359,7 +409,7 @@ def test_fetch_market_equity_rule() -> None:
 @pytest.mark.unit()
 def test_fetch_market_dead_band_is_neutral() -> None:
     series = {
-        "GXG": _market_series((30.0, 30.03)),      # +0.1% < banda 0.3%
+        "GXG": _market_series((30.0, 30.03)),  # +0.1% < banda 0.3%
         "DX-Y.NYB": _market_series((100.0, 100.0)),
         "BZ=F": _market_series((70.0, 70.0)),
     }
@@ -384,6 +434,7 @@ def test_fetch_market_fails_soft() -> None:
 
 
 # ── Etapa 4: compute_ts_signal / adjudicate ──────────────────────────────
+
 
 def _ensemble_df(latest: float, yhat_final: float) -> pd.DataFrame:
     return pd.DataFrame(
@@ -432,6 +483,8 @@ def test_adjudicate_uses_judge_verdict() -> None:
         direction="down",
         confidence=0.72,
         reconciliation="agree",
+        dominant_signal="news",
+        consistency_notes=["mock"],
         rationale="Noticias y serie apuntan a COP fuerte por tasas.",
         devils_advocate="El DXY podría repuntar tras el dato de empleo en EE.UU.",
         caveats=["Fuente única (CNN)"],
@@ -449,7 +502,7 @@ def test_adjudicate_uses_judge_verdict() -> None:
     call = result["directional_call"]
     assert call["direction"] == "down"
     assert call["confidence"] == 0.72
-    assert call["news_signal"]["score"] == 2.0      # inyectado por el sistema
+    assert call["news_signal"]["score"] == 2.0  # inyectado por el sistema
     assert call["ts_signal"]["yhat_delta_pct"] == -0.5
 
 
@@ -459,8 +512,10 @@ def test_adjudicate_divergence_cap_applies_to_llm_output() -> None:
 
     overconfident = AdjudicatorVerdict(
         direction="up",
-        confidence=0.95,                 # el LLM exagera...
-        reconciliation="diverge",        # ...en plena divergencia
+        confidence=0.95,  # el LLM exagera...
+        reconciliation="diverge",  # ...en plena divergencia
+        dominant_signal="timeseries",
+        consistency_notes=[],
         rationale="r",
         devils_advocate="Las noticias apuntan exactamente en la dirección contraria.",
         caveats=[],
@@ -471,11 +526,37 @@ def test_adjudicate_divergence_cap_applies_to_llm_output() -> None:
     base_llm.with_structured_output.return_value = structured_llm
 
     with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
-        result = adjudicate(
-            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8))
-        )
+        result = adjudicate(_base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8)))
 
     assert result["directional_call"]["confidence"] == 0.5  # acotado por contrato
+
+
+@pytest.mark.unit()
+def test_adjudicate_corrects_direction_against_dominant_signal() -> None:
+    from cop_fx.contracts import AdjudicatorVerdict
+
+    inconsistent = AdjudicatorVerdict(
+        direction="down",
+        confidence=0.48,
+        reconciliation="diverge",
+        dominant_signal="news",
+        consistency_notes=[],
+        rationale="Debe dominar el shock fiscal de noticias.",
+        devils_advocate="La serie técnica apunta en dirección contraria.",
+        caveats=[],
+    )
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = inconsistent
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = adjudicate(_base_state(news_signal=_news("up", -1.5), ts_signal=_ts("down", -0.4)))
+
+    call = result["directional_call"]
+    assert call["direction"] == "up"
+    assert call["dominant_signal"] == "news"
+    assert any("Direccion corregida" in note for note in call["consistency_notes"])
 
 
 @pytest.mark.unit()
@@ -489,9 +570,9 @@ def test_adjudicate_falls_back_deterministically() -> None:
         agree = adjudicate(
             _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("down", -0.5))
         )["directional_call"]
-        diverge = adjudicate(
-            _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8))
-        )["directional_call"]
+        diverge = adjudicate(_base_state(news_signal=_news("down", 2.0), ts_signal=_ts("up", 0.8)))[
+            "directional_call"
+        ]
         partial = adjudicate(
             _base_state(news_signal=_news("down", 2.0), ts_signal=_ts("neutral", 0.0))
         )["directional_call"]
@@ -516,8 +597,9 @@ def test_adjudicate_without_signals_abstains() -> None:
 
 # ── generate_report ───────────────────────────────────────────────────────
 
+
 @pytest.mark.unit()
-def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path: Path) -> None:
     ensemble = pd.DataFrame(
         {
             "ds": pd.date_range("2024-06-02", periods=3, freq="B"),
@@ -534,6 +616,12 @@ def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path) 
         news_summary="Peso weakened due to global risk-off.",
         ensemble_df=ensemble,
         eval_metrics=[],
+        top_story={
+            "title": "Ministerio de Hacienda ajusta meta fiscal",
+            "source": "La República",
+            "why_it_matters": "Aumenta la prima de riesgo soberano.",
+            "watch_next": "TES y reacción de calificadoras.",
+        },
     )
 
     with patch("cop_fx.agents.nodes.get_settings") as mock_settings:
@@ -548,10 +636,12 @@ def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path) 
     assert "1 USD = 4,050.00 COP" in result["report_markdown"]
     assert "+1.25%" in result["report_markdown"]
     assert result.get("tweet_text", "").startswith("COP/USD")
+    assert "Noticia clave:" in result.get("tweet_text", "")
     assert len(result.get("tweet_text", "")) <= 280
 
 
 # ── order_articles: mismo día = mismo pie ────────────────────────────────
+
 
 @pytest.mark.unit()
 def test_order_articles_same_day_interleaves_sources() -> None:
@@ -560,8 +650,13 @@ def test_order_articles_same_day_interleaves_sources() -> None:
     from cop_fx.data.news_fetcher import order_articles
 
     def art(source: str, title: str, dt: datetime) -> Article:
-        return Article(title=title, summary="x" * 100, url=f"https://x.com/{title}",
-                       published_at=dt, source=source)
+        return Article(
+            title=title,
+            summary="x" * 100,
+            url=f"https://x.com/{title}",
+            published_at=dt,
+            source=source,
+        )
 
     today = datetime(2026, 6, 12, tzinfo=UTC)
     arts = [
@@ -588,11 +683,17 @@ def test_order_articles_same_day_interleaves_sources() -> None:
 
 # ── pick_top_story: el agente editor ─────────────────────────────────────
 
+
 def _wa(title: str, severity: str = "high", relevance: str = "direct") -> dict:
     return {
-        "title": title, "source": "La República", "url": f"https://x.com/{title}",
-        "topic": "fiscal_policy", "fx_channel": "country_risk",
-        "severity": severity, "fx_relevance": relevance, "bullish_cop": False,
+        "title": title,
+        "source": "La República",
+        "url": f"https://x.com/{title}",
+        "topic": "fiscal_policy",
+        "fx_channel": "country_risk",
+        "severity": severity,
+        "fx_relevance": relevance,
+        "bullish_cop": False,
         "reasoning": "presión fiscal",
     }
 
@@ -605,6 +706,7 @@ def test_pick_top_story_uses_editor_choice() -> None:
     structured_llm = MagicMock()
     structured_llm.invoke.return_value = TopStory(
         chosen_index=1,
+        spanish_title="Reforma tributaria vuelve al centro del riesgo fiscal",
         why_it_matters="La reforma tributaria redefine la senda fiscal y la prima de riesgo país.",
         watch_next="El texto del proyecto de ley y la reacción de las calificadoras.",
     )
@@ -616,8 +718,9 @@ def test_pick_top_story_uses_editor_choice() -> None:
         result = pick_top_story(_base_state(worker_analyses=analyses))
 
     top = result["top_story"]
-    assert top["title"] == "Reforma tributaria"          # eligió el índice 1
-    assert top["source"] == "La República"               # hechos del sistema, no del LLM
+    assert top["title"] == "Reforma tributaria"  # eligió el índice 1
+    assert top["display_title"] == "Reforma tributaria vuelve al centro del riesgo fiscal"
+    assert top["source"] == "La República"  # hechos del sistema, no del LLM
     assert "fiscal" in top["why_it_matters"]
 
 
@@ -634,7 +737,7 @@ def test_pick_top_story_fallback_takes_heaviest() -> None:
     with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
         result = pick_top_story(_base_state(worker_analyses=analyses))
 
-    assert result["top_story"]["title"] == "Shock fiscal"  # mayor severidad×relevancia
+    assert result["top_story"]["title"] == "Shock fiscal"  # mayor severidad x relevancia
 
 
 @pytest.mark.unit()

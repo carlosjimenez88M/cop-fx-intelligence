@@ -18,8 +18,8 @@ def _series(start: str, days: int, base: float) -> pd.DataFrame:
 def test_panel_aligns_on_common_dates(monkeypatch: pytest.MonkeyPatch) -> None:
     fx = _series("2026-01-01", 10, 4000.0)
     fake = {
-        "BZ=F": _series("2026-01-03", 10, 70.0),       # empieza 2 días después
-        "DX-Y.NYB": _series("2026-01-01", 8, 100.0),   # termina antes
+        "BZ=F": _series("2026-01-03", 10, 70.0),  # empieza 2 días después
+        "DX-Y.NYB": _series("2026-01-01", 8, 100.0),  # termina antes
         "GXG": _series("2026-01-01", 10, 30.0),
     }
     monkeypatch.setattr(
@@ -48,6 +48,6 @@ def test_panel_degrades_gracefully_when_a_series_fails(
     monkeypatch.setattr(market_fetcher, "fetch_yahoo_series", _fetch)
     panel = market_fetcher.fetch_market_panel(fx)
 
-    assert "brent" not in panel.columns       # la caída no tumba el panel
+    assert "brent" not in panel.columns  # la caída no tumba el panel
     assert {"cop", "dxy", "equity"} <= set(panel.columns)
     assert len(panel) == 10

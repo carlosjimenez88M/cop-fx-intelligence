@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from typing import cast
 
 from langgraph.graph import END, START, StateGraph
 
@@ -31,7 +32,7 @@ from cop_fx.logger import get_logger
 logger = get_logger(__name__)
 
 
-def build_graph() -> StateGraph:
+def build_graph() -> StateGraph[PipelineState]:
     """Construct the intelligence pipeline graph.
 
     ::
@@ -125,6 +126,7 @@ def run_pipeline(
         "run_date": run_date or date.today().isoformat(),
         "horizon_days": settings.forecast_horizon_days,
         "publish_enabled": publish_enabled,
+        "persist_gold": True,
         "errors": [],
         "raw_articles": [],
         "analyzed_articles": [],
@@ -132,7 +134,7 @@ def run_pipeline(
 
     graph = build_graph()
     compiled = graph.compile()
-    final_state: PipelineState = compiled.invoke(initial_state)
+    final_state = cast("PipelineState", compiled.invoke(initial_state))
 
     if final_state.get("errors"):
         logger.warning("Pipeline completed with errors: %s", final_state["errors"])

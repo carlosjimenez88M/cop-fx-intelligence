@@ -44,6 +44,8 @@ dependencies = [
     "pyarrow>=24.0.0",
     "networkx>=3.6.1",
     "streamlit>=1.58.0",
+    "torch>=2.12.0",
+    "torchvision>=0.27.0",
 ]
 
 [project.optional-dependencies]
@@ -82,7 +84,7 @@ select = [
     "ANN",      # flake8-annotations (partial)
     "RUF",      # ruff-specific
 ]
-ignore = ["ANN101", "ANN102", "ANN401"]
+ignore = ["ANN401"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["cop_fx"]

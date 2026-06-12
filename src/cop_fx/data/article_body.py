@@ -19,7 +19,7 @@ descarga SOLO para los artículos materiales que van a los workers.
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 from bs4 import BeautifulSoup
@@ -74,17 +74,18 @@ def fetch_article_body(url: str, *, max_chars: int = MAX_BODY_CHARS, timeout: fl
         if len(body) < MIN_BODY_CHARS:
             logger.warning(
                 "Cuerpo demasiado corto (%d chars) en %s — probable paywall/boilerplate",
-                len(body), url,
+                len(body),
+                url,
             )
             return ""
         return body
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("No se pudo extraer el cuerpo de %s: %s", url, exc)
         return ""
 
 
 def attach_bodies(
-    articles: list,
+    articles: list[Any],
     *,
     max_articles: int = 30,
     max_chars: int = MAX_BODY_CHARS,
@@ -103,5 +104,9 @@ def attach_bodies(
         if body:
             fetched += 1
     if fetched:
-        logger.info("Cuerpos descargados: %d/%d artículos", fetched, min(len(articles), max_articles))
+        logger.info(
+            "Cuerpos descargados: %d/%d artículos",
+            fetched,
+            min(len(articles), max_articles),
+        )
     return fetched

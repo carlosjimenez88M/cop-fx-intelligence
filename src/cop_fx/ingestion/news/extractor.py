@@ -40,6 +40,7 @@ _TIMEOUT = httpx.Timeout(20.0)
 # Descarga de una fuente
 # ---------------------------------------------------------------------------
 
+
 def _download(url: str) -> bytes | None:
     """GET con timeout y User-Agent. Devuelve None si falla (feed caído)."""
     try:
@@ -54,9 +55,27 @@ def _download(url: str) -> bytes | None:
 
 def _parse_published(entry: feedparser.FeedParserDict) -> datetime:
     if getattr(entry, "published_parsed", None):
-        return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+        parsed = entry.published_parsed
+        return datetime(
+            parsed.tm_year,
+            parsed.tm_mon,
+            parsed.tm_mday,
+            parsed.tm_hour,
+            parsed.tm_min,
+            parsed.tm_sec,
+            tzinfo=UTC,
+        )
     if getattr(entry, "updated_parsed", None):
-        return datetime(*entry.updated_parsed[:6], tzinfo=UTC)
+        parsed = entry.updated_parsed
+        return datetime(
+            parsed.tm_year,
+            parsed.tm_mon,
+            parsed.tm_mday,
+            parsed.tm_hour,
+            parsed.tm_min,
+            parsed.tm_sec,
+            tzinfo=UTC,
+        )
     return datetime.now(tz=UTC)
 
 
@@ -83,6 +102,7 @@ def _parse_feed(raw: bytes, source: NewsSource) -> list[Article]:
 # ---------------------------------------------------------------------------
 # Orquestación
 # ---------------------------------------------------------------------------
+
 
 def fetch_all(
     sources: list[NewsSource] | None = None,
@@ -115,13 +135,14 @@ def fetch_all(
 
     unique = sorted(by_id.values(), key=lambda a: a.published_at, reverse=True)
     result = unique[:max_articles]
-    logger.success("Total: %d únicos (de %d brutos)", len(result), len(collected))
+    logger.success("Total: %d únicos (de %d brutos)", len(result), len(collected))  # type: ignore[attr-defined]
     return result
 
 
 # ---------------------------------------------------------------------------
 # Persistencia bronze
 # ---------------------------------------------------------------------------
+
 
 def persist_bronze(
     articles: list[Article],
@@ -168,6 +189,7 @@ def run_news_ingestion(
 # ---------------------------------------------------------------------------
 # Validación de fuentes (para que NO confíes en la lista a ciegas)
 # ---------------------------------------------------------------------------
+
 
 def validate_sources(sources: list[NewsSource] | None = None) -> dict[str, int]:
     """Devuelve {nombre: n_articulos}. 0 = feed caído o vacío."""

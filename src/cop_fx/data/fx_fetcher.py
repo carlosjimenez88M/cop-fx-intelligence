@@ -86,10 +86,7 @@ class FXFetcher:
             raise ValueError(data.get("Error Message") or data.get("Note"))
 
         series = data["Time Series FX (Daily)"]
-        rows = [
-            {"ds": pd.Timestamp(k), "y": float(v["4. close"])}
-            for k, v in series.items()
-        ]
+        rows = [{"ds": pd.Timestamp(k), "y": float(v["4. close"])} for k, v in series.items()]
         return pd.DataFrame(rows)
 
     def _fetch_trm_datos_gov(self, start: date, end: date) -> pd.DataFrame:

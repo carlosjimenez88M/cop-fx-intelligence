@@ -39,6 +39,7 @@ jobs:
       - name: Run unit tests
         run: uv run pytest -m "unit" --cov=src/cop_fx --cov-report=xml
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY || 'sk-openai-placeholder' }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY || 'sk-ant-placeholder' }}
 
       - name: Upload coverage

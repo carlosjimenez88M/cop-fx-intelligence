@@ -7,7 +7,7 @@
 
 # ── LLM ──────────────────────────────────────────────────────
 llm_provider: openai
-llm_model: gpt-5.4-mini          # tier 'fast': clasificación por lote (alto volumen)
+llm_model: gpt-5-mini          # tier 'fast': clasificación por lote (alto volumen)
 llm_model_judge: gpt-5.4-mini    # tier 'judge': el adjudicador (1 llamada de alto valor)
 llm_temperature: 0.0             # clasificación direccional = determinismo
 
@@ -21,6 +21,33 @@ news_rss_feeds:
   - https://www.portafolio.co/rss/economia.xml   # paywall: solo resumen de 1 línea
   # Lado USD: macro global / Fed
   - https://www.cnbc.com/id/20910258/device/rss/rss.html  # cuerpo extraíble (~1.800 chars)
+
+# ── Keywords / GOLD query ────────────────────────────────────
+keyword_llm_judge_enabled: true  # el LLM filtra términos accionables antes del grafo
+keyword_top_n: 25                # términos a mostrar en dashboard/notebooks
+keyword_min_articles: 1          # mínimo de noticias por término (GOLD es pequeño)
+keyword_pairwise_min_correlation: 0.20
+keyword_pairwise_min_joint: 2    # pares recurrentes; si no se repiten, no entran al dashboard
+keyword_pairwise_top_n: 80
+keyword_domain_stopwords:
+  # Genéricos del universo COP/USD: frecuentes, pero poco explicativos.
+  - colombia
+  - colombiano
+  - colombiana
+  - colombianos
+  - colombianas
+  - pais
+  - país
+  - gobierno
+  - nacional
+  - economia
+  - economía
+  - mercado
+  - mercados
+  - cop
+  - usd
+  - dolar
+  - dólar
 
 # ── Agentes ──────────────────────────────────────────────────
 max_topic_workers: 6             # cota del fan-out (Send) — controla costo

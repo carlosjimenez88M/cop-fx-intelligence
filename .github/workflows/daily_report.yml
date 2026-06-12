@@ -28,6 +28,7 @@ jobs:
       - name: Run daily pipeline
         run: uv run cop-fx run --publish
         env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           ALPHA_VANTAGE_API_KEY: ${{ secrets.ALPHA_VANTAGE_API_KEY }}
           NEWSAPI_KEY: ${{ secrets.NEWSAPI_KEY }}

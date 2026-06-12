@@ -15,12 +15,14 @@ Uso::
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from langchain.chat_models import init_chat_model
-from langchain_core.language_models.chat_models import BaseChatModel
 
 from cop_fx.config.settings import get_settings
+
+if TYPE_CHECKING:
+    from langchain_core.language_models.chat_models import BaseChatModel
 
 Tier = Literal["fast", "judge"]
 

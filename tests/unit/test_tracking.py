@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -10,6 +10,9 @@ import pytest
 
 from cop_fx.contracts import DirectionalCall, NewsSignal, TimeSeriesSignal
 from cop_fx.tracking import PredictionStore, directional_backtest
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _call(direction: str = "up", confidence: float = 0.6) -> DirectionalCall:
@@ -20,6 +23,7 @@ def _call(direction: str = "up", confidence: float = 0.6) -> DirectionalCall:
         news_signal=NewsSignal(direction="up", score=-1.5, drivers=["riesgo país"]),
         ts_signal=TimeSeriesSignal(direction="up", yhat_delta_pct=0.5, models_agree=True),
         reconciliation="agree",
+        dominant_signal="news",
         rationale="r",
         devils_advocate="El petróleo podría repuntar y revertir la presión sobre el peso.",
         caveats=[],
@@ -56,6 +60,9 @@ def test_evaluate_pending_scores_hits(tmp_path: Path) -> None:
     row = store.all().iloc[0]
     assert row["actual_direction"] == "up"
     assert row["hit"] == 1
+    assert row["final_hit"] == 1
+    assert row["news_hit"] == 1
+    assert row["ts_hit"] == 1
 
     # Re-evaluar no duplica trabajo
     assert store.evaluate_pending(fx) == 0
@@ -95,6 +102,9 @@ def test_metrics_shapes(tmp_path: Path) -> None:
     assert m["n_evaluated"] == 2
     assert m["n_decided"] == 2
     assert m["hit_rate"] == 0.5  # up acertó, down falló
+    assert m["final_hit_rate"] == 0.5
+    assert m["news_hit_rate"] == 1.0
+    assert m["ts_hit_rate"] == 1.0
     assert "confusion" in m and "hit_rate_by_confidence" in m
 
 

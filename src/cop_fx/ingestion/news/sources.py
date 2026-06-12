@@ -38,7 +38,11 @@ COLOMBIA_SOURCES: list[NewsSource] = [
 # --- Global / lado USD ------------------------------------------------------
 GLOBAL_SOURCES: list[NewsSource] = [
     NewsSource("Investing.com — Forex", "https://www.investing.com/rss/news_1.rss", "GLOBAL"),
-    NewsSource("Federal Reserve — Press releases", "https://www.federalreserve.gov/feeds/press_all.xml", "GLOBAL"),
+    NewsSource(
+        "Federal Reserve — Press releases",
+        "https://www.federalreserve.gov/feeds/press_all.xml",
+        "GLOBAL",
+    ),
 ]
 
 SOURCES: list[NewsSource] = COLOMBIA_SOURCES + GLOBAL_SOURCES

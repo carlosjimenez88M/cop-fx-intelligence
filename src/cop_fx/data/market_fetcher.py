@@ -56,9 +56,7 @@ def fetch_yahoo_series(symbol: str, lookback_days: int = 365) -> pd.DataFrame:
     return df.dropna().drop_duplicates(subset="ds").reset_index(drop=True)
 
 
-def fetch_market_panel(
-    fx_df: pd.DataFrame, *, lookback_days: int = 365
-) -> pd.DataFrame:
+def fetch_market_panel(fx_df: pd.DataFrame, *, lookback_days: int = 365) -> pd.DataFrame:
     """Panel alineado por fecha: cop + brent + dxy + equity (inner join).
 
     Las series que fallen se omiten con warning — el panel degrada con
@@ -68,9 +66,7 @@ def fetch_market_panel(
     for name, symbol in MARKET_SYMBOLS.items():
         try:
             series = fetch_yahoo_series(symbol, lookback_days)
-            panel = panel.merge(
-                series.rename(columns={"y": name}), on="ds", how="inner"
-            )
+            panel = panel.merge(series.rename(columns={"y": name}), on="ds", how="inner")
             logger.info("Serie %s (%s): %d filas", name, symbol, len(series))
         except Exception as exc:
             logger.warning("Serie %s (%s) falló: %s — se omite", name, symbol, exc)

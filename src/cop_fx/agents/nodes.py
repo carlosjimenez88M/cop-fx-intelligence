@@ -2,24 +2,33 @@
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import Any, Literal, cast
 
+import pandas as pd
 from langgraph.types import Send
 
-if TYPE_CHECKING:
-    import pandas as pd
-
-from cop_fx.agents.state import PipelineState, TopicWorkerState
+from cop_fx.agents.state import PipelineState, TopicWorkerState  # noqa: TC001
+from cop_fx.analysis.keyword_analysis import (
+    build_term_documents,
+    judge_terms,
+    pairwise_phi,
+    rank_terms,
+)
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
+from cop_fx.analysis.topic_taxonomy import article_importance
 from cop_fx.config.settings import get_settings
 from cop_fx.contracts import (
     RELEVANCE_WEIGHT,
     SEVERITY_WEIGHT,
     AdjudicatorVerdict,
     ArticleAnalysis,
+    Direction,
     DirectionalCall,
+    DominantSignal,
     MarketSignal,
     MaterialityGate,
     NewsSignal,
@@ -33,7 +42,7 @@ from cop_fx.data.market_fetcher import MARKET_SYMBOLS, fetch_yahoo_series
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
 from cop_fx.logger import get_logger
-from cop_fx.paths import PROJECT_ROOT
+from cop_fx.paths import DATA_DIR, PROJECT_ROOT
 from cop_fx.timeseries.evaluator import evaluate
 from cop_fx.timeseries.models import (
     ARIMAForecaster,
@@ -54,10 +63,61 @@ MARKET_DEAD_BAND_PCT = _cfg.market_dead_band_pct
 GATE_HEADLINES_CAP = _cfg.gate_headlines_cap
 MIN_ANALYZABLE_CHARS = _cfg.min_analyzable_chars
 
+_COLOMBIA_SCOPE_TERMS = {
+    "banrep",
+    "bogota",
+    "bogotá",
+    "colombia",
+    "colombian",
+    "colombiana",
+    "colombiano",
+    "cop",
+    "dian",
+    "ecopetrol",
+    "hacienda",
+    "minhacienda",
+    "petro",
+    "peso",
+    "trm",
+}
+_USD_LEG_TERMS = {
+    "cpi",
+    "dollar index",
+    "dxy",
+    "fed",
+    "federal reserve",
+    "fomc",
+    "inflacion ee. uu.",
+    "inflación ee. uu.",
+    "ppi",
+    "tariff",
+    "treasury",
+    "u.s.",
+    "us ",
+    "usa",
+    "wholesale prices",
+}
+_GLOBAL_TRANSMISSION_TERMS = {
+    "brent",
+    "capital flows",
+    "commodities",
+    "commodity",
+    "credit rating",
+    "emerging markets",
+    "energy",
+    "global risk",
+    "oil",
+    "petroleo",
+    "petróleo",
+    "risk appetite",
+    "spread",
+}
+
 
 # ---------------------------------------------------------------------------
 # Node: fetch_fx
 # ---------------------------------------------------------------------------
+
 
 def fetch_fx(state: PipelineState) -> PipelineState:
     """Download historical FX data and compute summary stats."""
@@ -82,6 +142,7 @@ def fetch_fx(state: PipelineState) -> PipelineState:
 # Node: fetch_news
 # ---------------------------------------------------------------------------
 
+
 def fetch_news(state: PipelineState) -> PipelineState:
     """Download latest economic news articles."""
     try:
@@ -96,6 +157,7 @@ def fetch_news(state: PipelineState) -> PipelineState:
 # ---------------------------------------------------------------------------
 # Node: fetch_market  (integración del estudio macro — notebooks/02)
 # ---------------------------------------------------------------------------
+
 
 def fetch_market(state: PipelineState) -> PipelineState:
     """Contexto de mercado determinista para el adjudicador.
@@ -115,7 +177,7 @@ def fetch_market(state: PipelineState) -> PipelineState:
 
         equity = rets["equity"]
         if equity > MARKET_DEAD_BAND_PCT:
-            direction = "down"   # bolsa arriba ⇒ apetito por Colombia ⇒ USD/COP baja
+            direction = "down"  # bolsa arriba ⇒ apetito por Colombia ⇒ USD/COP baja
         elif equity < -MARKET_DEAD_BAND_PCT:
             direction = "up"
         else:
@@ -129,7 +191,10 @@ def fetch_market(state: PipelineState) -> PipelineState:
         )
         logger.info(
             "Market context: %s (equity %+.2f%%, dxy %+.2f%%, brent %+.2f%%)",
-            signal.direction, equity, rets["dxy"], rets["brent"],
+            signal.direction,
+            equity,
+            rets["dxy"],
+            rets["brent"],
         )
         return {"market_signal": signal.model_dump()}
     except Exception as exc:
@@ -141,11 +206,21 @@ def fetch_market(state: PipelineState) -> PipelineState:
 # Node: check_materiality  (Etapa 2 — router / gate de costo)
 # ---------------------------------------------------------------------------
 
-_MATERIALITY_PROMPT = """You are a gatekeeper for a Colombian FX analysis pipeline.
+_MATERIALITY_PROMPT = """You are the first-line materiality officer for a
+Colombian FX desk. You are paid to reject noise before it consumes analyst
+time. Be strict, independent, and mechanism-driven.
 
 For EACH headline below, produce a tag with its 0-based index, its topic
 (use the full taxonomy — sports and culture have their own categories),
 and whether THAT headline could materially move the USD/COP exchange rate.
+The asset is USD/COP, not generic global macro. A headline is material only
+if it affects Colombia/COP directly, the USD leg through Fed/US macro, oil or
+terms of trade, country risk, or capital flows into Colombia/EM assets.
+
+Material means: a reasonable FX desk could update its 1-7 business day
+USD/COP view because the headline implies new information about rates,
+inflation, fiscal risk, oil/terms of trade, country risk, capital flows,
+growth, or the global USD leg.
 
 Think in transmission channels, including second-order ones:
   - monetary/fiscal policy, oil/commodities, political risk, trade, US macro
@@ -156,10 +231,20 @@ Think in transmission channels, including second-order ones:
   - foreign macro OUTSIDE the US (Europe, UK, Asia) matters only if it moves
     global risk appetite, oil or the dollar index — on its own it is usually
     NOT material for USD/COP;
+  - English-language sources are acceptable only when the Colombia/COP or
+    USD-leg transmission is explicit enough to explain in Spanish;
   - sports, entertainment and human-interest stories are NOT material.
 
+Reject:
+  - stale follow-ups with no new fact;
+  - generic business optimism with no FX channel;
+  - purely local crime/weather unless it can affect inflation, exports,
+    energy, fiscal cost, or country risk;
+  - foreign macro outside the US when it is not tied to DXY, oil or risk appetite.
+
 Then set `has_material_news` = true if at least one headline is material,
-and explain the overall verdict in `reason`.
+and explain the overall verdict in `reason`. If evidence is borderline,
+prefer `material=false` for that headline and mention the uncertainty.
 
 HEADLINES:
 {digest}
@@ -214,6 +299,7 @@ def route_materiality(state: PipelineState) -> str:
 # Node: skip_news  (ruta barata: cero tokens adicionales)
 # ---------------------------------------------------------------------------
 
+
 def skip_news(state: PipelineState) -> PipelineState:
     """No material news: the forecast carries the call, with low confidence."""
     reason = state.get("materiality_reason", "")
@@ -227,13 +313,16 @@ def skip_news(state: PipelineState) -> PipelineState:
 # Etapa 3 — orchestrator → Send(topic_worker x N) → aggregate_signals
 # ---------------------------------------------------------------------------
 
+
 def _analysis_to_dict(item: AnalyzedArticle) -> dict[str, object]:
     """Serializa un AnalyzedArticle a dict para el estado del grafo."""
     return {
         "title": item.article.title,
         "source": item.article.source,
         "author": getattr(item.article, "author", ""),
+        "summary": getattr(item.article, "summary", ""),
         "url": item.article.url,
+        "published_at": getattr(item.article, "published_at", None),
         "topic": item.topic,
         "keywords": item.keywords,
         "entities": item.entities,
@@ -243,6 +332,331 @@ def _analysis_to_dict(item: AnalyzedArticle) -> dict[str, object]:
         "bullish_cop": item.bullish_cop,
         "reasoning": item.reasoning,
     }
+
+
+def _has_colombia_or_us_cop_scope(article: dict[str, Any]) -> bool:
+    """Keep only news with Colombia scope or a defensible USD/COP transmission."""
+    if article.get("fx_relevance") == "none" or article.get("fx_channel") == "none":
+        return False
+
+    text = " ".join(
+        str(part or "")
+        for part in (
+            article.get("title"),
+            article.get("source"),
+            article.get("summary"),
+            article.get("topic"),
+            article.get("fx_channel"),
+            article.get("reasoning"),
+            " ".join(str(item) for item in article.get("keywords") or []),
+            " ".join(str(item) for item in article.get("entities") or []),
+        )
+    ).lower()
+
+    if any(term in text for term in _COLOMBIA_SCOPE_TERMS):
+        return True
+    if article.get("topic") == "us_global_macro" and any(term in text for term in _USD_LEG_TERMS):
+        return True
+    if article.get("fx_channel") in {"terms_of_trade", "capital_flows", "country_risk"}:
+        return any(term in text for term in _GLOBAL_TRANSMISSION_TERMS)
+    return False
+
+
+def _apply_scope_guard(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Downgrade material articles that are global noise for a Colombia FX desk."""
+    guarded: list[dict[str, Any]] = []
+    downgraded = 0
+    for article in articles:
+        item = dict(article)
+        if item.get("fx_relevance") != "none" and not _has_colombia_or_us_cop_scope(item):
+            downgraded += 1
+            item["fx_relevance"] = "none"
+            item["fx_channel"] = "none"
+            item["severity"] = "low"
+            item["bullish_cop"] = False
+            item["reasoning"] = (
+                "Descartada: no muestra canal claro hacia Colombia, COP, USD global "
+                "o términos de intercambio."
+            )
+        guarded.append(item)
+    if downgraded:
+        logger.info("Scope guard: %d artículos globales degradados a no materiales", downgraded)
+    return guarded
+
+
+def _persist_gold_articles(articles: list[dict[str, Any]]) -> None:
+    """Persist latest GOLD article classifications for dashboard/notebooks."""
+    if not articles:
+        return
+    db_path = DATA_DIR / "cnn_articles.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    rows = []
+    now = datetime.now(UTC).isoformat()
+    for article in articles:
+        published = article.get("published_at")
+        if isinstance(published, datetime):
+            published_at = published.isoformat()
+        else:
+            published_at = str(published or "")
+        rows.append(
+            (
+                article.get("title", ""),
+                article.get("author", ""),
+                published_at,
+                article.get("summary", ""),
+                article.get("url", ""),
+                article.get("source", ""),
+                article.get("topic", "other"),
+                json.dumps(article.get("keywords") or [], ensure_ascii=False),
+                now,
+                json.dumps(article.get("entities") or [], ensure_ascii=False),
+                article.get("fx_relevance", "none"),
+                article.get("fx_channel", "none"),
+                article.get("severity", "low"),
+                int(bool(article.get("bullish_cop", False))),
+                article.get("reasoning", ""),
+            )
+        )
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS articles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                title TEXT,
+                author TEXT,
+                published_at TEXT,
+                summary TEXT,
+                url TEXT,
+                source TEXT,
+                topic TEXT,
+                keywords TEXT,
+                fetched_at TEXT,
+                entities TEXT,
+                fx_relevance TEXT,
+                fx_channel TEXT,
+                severity TEXT,
+                bullish_cop INTEGER,
+                reasoning TEXT
+            )
+            """
+        )
+        conn.execute("DELETE FROM articles")
+        conn.executemany(
+            """
+            INSERT INTO articles (
+                title, author, published_at, summary, url, source, topic,
+                keywords, fetched_at, entities, fx_relevance, fx_channel,
+                severity, bullish_cop, reasoning
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+    logger.info("Persisted %d GOLD articles to %s", len(rows), db_path)
+
+
+def _entity_rollup_for_pipeline(
+    articles: pd.DataFrame,
+    *,
+    domain_stopwords: list[str],
+    top_n: int = 20,
+) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    stopwords = {word.casefold() for word in domain_stopwords}
+    for _, row in articles.iterrows():
+        for entity in row.get("entities_list") or []:
+            if str(entity).casefold() in stopwords:
+                continue
+            rows.append(
+                {
+                    "term": str(entity),
+                    "score": float(row.get("importance") or 0.0),
+                    "article_count": 1,
+                }
+            )
+    if not rows:
+        return pd.DataFrame(columns=["term", "score", "article_count"])
+    return (
+        pd.DataFrame(rows)
+        .groupby("term", as_index=False)
+        .agg(score=("score", "sum"), article_count=("article_count", "sum"))
+        .sort_values(["score", "article_count"], ascending=False)
+        .head(top_n)
+    )
+
+
+def _persist_gold_keyword_insights(articles: list[dict[str, Any]]) -> None:
+    """Persist keyword rankings for the dashboard and pairwise pairs for research."""
+    if not articles:
+        return
+    import pandas as pd
+
+    settings = get_settings()
+    now = datetime.now(UTC).isoformat()
+    material = pd.DataFrame([item for item in articles if item.get("fx_relevance") != "none"])
+    db_path = DATA_DIR / "cnn_articles.db"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keyword_terms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT,
+                term_key TEXT,
+                score REAL,
+                article_count INTEGER,
+                llm_score REAL,
+                reason TEXT,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keyword_pairs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item1 TEXT,
+                item2 TEXT,
+                correlation REAL,
+                n_both INTEGER,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS keyword_entities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                term TEXT,
+                score REAL,
+                article_count INTEGER,
+                computed_at TEXT
+            )
+            """
+        )
+        conn.execute("DELETE FROM keyword_terms")
+        conn.execute("DELETE FROM keyword_pairs")
+        conn.execute("DELETE FROM keyword_entities")
+
+        if material.empty:
+            return
+
+        material["keywords_list"] = material["keywords"].apply(lambda value: list(value or []))
+        material["entities_list"] = material["entities"].apply(lambda value: list(value or []))
+        material["importance"] = material.apply(article_importance, axis=1)
+        term_docs = build_term_documents(
+            material,
+            domain_stopwords=settings.keyword_domain_stopwords,
+            include_entities=False,
+        )
+        if term_docs.empty:
+            entities = _entity_rollup_for_pipeline(
+                material,
+                domain_stopwords=settings.keyword_domain_stopwords,
+            )
+            conn.executemany(
+                """
+                INSERT INTO keyword_entities (term, score, article_count, computed_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                [
+                    (
+                        str(row["term"]),
+                        float(str(row["score"])),
+                        int(float(str(row["article_count"]))),
+                        now,
+                    )
+                    for row in entities.to_dict("records")
+                ],
+            )
+            return
+
+        candidate_terms = (
+            term_docs.groupby(["term_key", "term"], as_index=False)
+            .agg(score=("importance", "sum"), noticias=("doc_id", "nunique"))
+            .sort_values(["score", "noticias"], ascending=False)
+            .head(max(settings.keyword_top_n * 2, 30))["term"]
+            .tolist()
+        )
+        decisions = judge_terms(
+            candidate_terms,
+            use_llm=settings.keyword_llm_judge_enabled,
+            domain_stopwords=settings.keyword_domain_stopwords,
+        )
+        terms = rank_terms(
+            term_docs,
+            decisions,
+            min_articles=settings.keyword_min_articles,
+            top_n=settings.keyword_top_n,
+        )
+        pairs = pairwise_phi(
+            term_docs,
+            terms["termino"].tolist() if not terms.empty else [],
+            min_joint=settings.keyword_pairwise_min_joint,
+        )
+        if not pairs.empty:
+            pairs = pairs[
+                pairs["correlation"] >= settings.keyword_pairwise_min_correlation
+            ].head(settings.keyword_pairwise_top_n)
+        entities = _entity_rollup_for_pipeline(
+            material,
+            domain_stopwords=settings.keyword_domain_stopwords,
+        )
+
+        conn.executemany(
+            """
+            INSERT INTO keyword_terms (
+                term, term_key, score, article_count, llm_score, reason, computed_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(row["termino"]),
+                    str(row["term_key"]),
+                    float(str(row["score"])),
+                    int(float(str(row["noticias"]))),
+                    float(str(row["llm_score"])),
+                    str(row["reason"]),
+                    now,
+                )
+                for row in terms.to_dict("records")
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO keyword_pairs (item1, item2, correlation, n_both, computed_at)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(row["item1"]),
+                    str(row["item2"]),
+                    float(str(row["correlation"])),
+                    int(float(str(row["n_both"]))),
+                    now,
+                )
+                for row in pairs.to_dict("records")
+            ],
+        )
+        conn.executemany(
+            """
+            INSERT INTO keyword_entities (term, score, article_count, computed_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (
+                    str(row["term"]),
+                    float(str(row["score"])),
+                    int(float(str(row["article_count"]))),
+                    now,
+                )
+                for row in entities.to_dict("records")
+            ],
+        )
+    logger.info("Persisted GOLD keyword insights to %s", db_path)
 
 
 def orchestrate(state: PipelineState) -> PipelineState:
@@ -319,13 +733,13 @@ def topic_worker(state: TopicWorkerState) -> PipelineState:
     # ni summary decente) el artículo NO aporta nada y se descarta.
     attach_bodies(articles)
     readable = [
-        a for a in articles
-        if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
+        a for a in articles if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
     ]
     if len(readable) < len(articles):
         logger.info(
             "topic_worker[%s]: %d artículos sin texto analizable descartados",
-            topic, len(articles) - len(readable),
+            topic,
+            len(articles) - len(readable),
         )
     if not readable:
         return {"worker_analyses": [], "cluster_narratives": []}
@@ -340,7 +754,7 @@ def topic_worker(state: TopicWorkerState) -> PipelineState:
 
 def aggregate_signals(state: PipelineState) -> PipelineState:
     """Consolida los workers en una señal direccional — determinista, sin LLM."""
-    analyzed = state.get("worker_analyses", [])
+    analyzed = _apply_scope_guard(state.get("worker_analyses", []))
 
     analyses = []
     titles: dict[int, str] = {}
@@ -368,6 +782,12 @@ def aggregate_signals(state: PipelineState) -> PipelineState:
         signal.score,
         len(signal.drivers),
     )
+    if state.get("persist_gold", False):
+        try:
+            _persist_gold_articles(analyzed)
+            _persist_gold_keyword_insights(analyzed)
+        except Exception as exc:
+            logger.warning("No se pudo persistir la capa GOLD: %s", exc)
     return {
         "analyzed_articles": analyzed,
         "news_signal": signal.model_dump(),
@@ -379,14 +799,35 @@ def aggregate_signals(state: PipelineState) -> PipelineState:
 # Node: pick_top_story  (el agente editor — ¿cuál es LA noticia del día?)
 # ---------------------------------------------------------------------------
 
-_TOP_STORY_PROMPT = """You are the front-page editor of a Colombian FX desk.
+_TOP_STORY_PROMPT = """You are the front-page editor AND risk manager of a
+Colombian FX desk. Your job is to choose the one story that would most
+deserve a trader's attention before deciding USD/COP exposure.
 
 From the analyzed candidates below, choose THE single most important story
-of the day for the USD/COP direction. Importance = severity x transmission
-channel x novelty: a structural shock (tax reform, fiscal target change,
-BanRep surprise, oil regime change) beats routine or repeated noise.
+of the day for the USD/COP direction over the next 1-7 business days.
+Importance = horizon relevance x transmission channel x novelty x evidence
+quality. A structural story only wins if it can plausibly reprice spot USD/COP
+during this horizon.
 
-Write `why_it_matters` and `watch_next` in SPANISH.
+Decision criteria, in order:
+1. Transmission clarity: the story must have a named FX channel.
+2. Horizon relevance: prefer stories that can move spot in 1-7 business days.
+   Penalize announcements whose main effect is years away unless markets are
+   likely to reprice credibility, TES, CDS, fiscal risk or expectations now.
+3. Surprise/novelty: new information beats repetition of an already-known theme.
+4. Persistence: a durable repricing driver beats intraday noise.
+5. Scope: macro/fiscal/monetary/oil/global USD beats narrow sector color.
+6. Evidence quality: prefer specific facts over vague commentary. If an article
+   likely came from a short paywalled summary, be conservative.
+
+If the highest-severity item is stale, routine, or duplicated, choose the
+cleaner fresher driver instead. Do not choose a story merely because it is
+dramatic; choose it because it can reprice USD/COP.
+
+Write `spanish_title` as a concise Spanish desk headline faithful to the
+chosen original title. Keep proper nouns, acronyms and tickers unchanged.
+Write `why_it_matters` and `watch_next` in SPANISH only. Do not use English or
+other languages except proper nouns, tickers and institution names.
 
 CANDIDATES:
 {candidates}
@@ -394,9 +835,9 @@ CANDIDATES:
 
 
 def pick_top_story(state: PipelineState) -> PipelineState:
-    """Agente editor: elige la noticia MÁS importante del día.
+    """Agente editor: elige la noticia MAS importante del dia.
 
-    Preselección determinista (severidad × relevancia, top 10) para no
+    Preseleccion determinista (severidad x relevancia, top 10) para no
     gastar tokens en ruido; el LLM solo elige y justifica; el sistema
     compone el registro con los datos reales del artículo elegido.
     Fallback determinista: el candidato de mayor peso.
@@ -420,9 +861,15 @@ def pick_top_story(state: PipelineState) -> PipelineState:
         for i, d in enumerate(candidates)
     )
 
-    def _compose(chosen: dict, why: str, watch: str) -> dict[str, object]:
+    def _compose(
+        chosen: dict[str, Any],
+        spanish_title: str,
+        why: str,
+        watch: str,
+    ) -> dict[str, object]:
         return {
             "title": chosen["title"],
+            "display_title": spanish_title,
             "source": chosen.get("source", ""),
             "url": chosen.get("url", ""),
             "topic": chosen["topic"],
@@ -437,13 +884,14 @@ def pick_top_story(state: PipelineState) -> PipelineState:
         raw = llm.invoke(_TOP_STORY_PROMPT.format(candidates=digest))
         ts = raw if isinstance(raw, TopStory) else TopStory.model_validate(raw)
         chosen = candidates[min(ts.chosen_index, len(candidates) - 1)]
-        top = _compose(chosen, ts.why_it_matters, ts.watch_next)
-    except Exception as exc:  # noqa: BLE001
+        top = _compose(chosen, ts.spanish_title, ts.why_it_matters, ts.watch_next)
+    except Exception as exc:
         logger.warning("pick_top_story LLM failed (%s) — fallback determinista", exc)
         chosen = candidates[0]
         top = _compose(
             chosen,
-            f"Mayor peso severidad×relevancia del día: {chosen['reasoning']}",
+            str(chosen["title"]),
+            f"Mayor peso severidad x relevancia del dia: {chosen['reasoning']}",
             "Seguimiento del tema en la próxima corrida.",
         )
 
@@ -455,6 +903,7 @@ def pick_top_story(state: PipelineState) -> PipelineState:
 # Node: analyze_news  (modo una-sola-llamada — Etapa 1; lo usan notebooks/tests)
 # ---------------------------------------------------------------------------
 
+
 def analyze_news(state: PipelineState) -> PipelineState:
     """Classify articles via NewsAnalyzer (structured output, tier 'fast')."""
     articles = state.get("raw_articles", [])
@@ -464,8 +913,7 @@ def analyze_news(state: PipelineState) -> PipelineState:
     pool = articles[:30]
     attach_bodies(pool)  # veredictos sobre la noticia completa
     readable = [
-        a for a in pool
-        if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
+        a for a in pool if len(getattr(a, "body", "") or a.summary) >= MIN_ANALYZABLE_CHARS
     ][:20]
     if not readable:
         return {"analyzed_articles": [], "news_summary": "No analyzable news today."}
@@ -477,6 +925,7 @@ def analyze_news(state: PipelineState) -> PipelineState:
 # ---------------------------------------------------------------------------
 # Node: run_forecast
 # ---------------------------------------------------------------------------
+
 
 def run_forecast(state: PipelineState) -> PipelineState:
     """Fit Prophet + ARIMA and build ensemble forecast."""
@@ -512,7 +961,7 @@ def run_forecast(state: PipelineState) -> PipelineState:
     train_df = df.iloc[: len(df) - horizon]
     for forecaster_cls in [ProphetForecaster, ARIMAForecaster]:
         try:
-            r = forecaster_cls().fit_predict(train_df, horizon_days=horizon)  # type: ignore[operator]
+            r = forecaster_cls().fit_predict(train_df, horizon_days=horizon)
             eval_metrics.append(evaluate(r, test_df))
         except Exception:
             pass
@@ -550,6 +999,7 @@ def compute_ts_signal(
     yhat_final = float(ensemble_df["yhat"].iloc[-1])
     delta_pct = (yhat_final - latest) / latest * 100
 
+    direction: Direction
     if delta_pct > TS_NEUTRAL_BAND_PCT:
         direction = "up"
     elif delta_pct < -TS_NEUTRAL_BAND_PCT:
@@ -569,7 +1019,7 @@ def compute_ts_signal(
         and _sign(prophet_result) == _sign(arima_result)
     )
     return TimeSeriesSignal(
-        direction=direction,  # type: ignore[arg-type]
+        direction=direction,
         yhat_delta_pct=round(delta_pct, 3),
         models_agree=models_agree,
     )
@@ -579,9 +1029,14 @@ def compute_ts_signal(
 # Node: adjudicate  (Etapa 4 — la capa de racionalidad)
 # ---------------------------------------------------------------------------
 
-_ADJUDICATOR_PROMPT = """You are the adjudicator of a Colombian FX intelligence system.
-You must reconcile two INDEPENDENT signals about the USD/COP direction for
-the next {horizon} days and produce a single, honestly-calibrated verdict.
+_ADJUDICATOR_PROMPT = """You are the independent chair of a Colombian FX
+investment committee. You are not a news summarizer and not a chart follower:
+your job is to reconcile independent evidence and decide whether the desk
+should call USD/COP up, down, or abstain for the next {horizon} days.
+
+You must be adversarial toward every signal. News can overreact to headlines;
+time-series models can extrapolate stale trends; market context can be a one-day
+false signal. The professional answer is often neutral.
 
 NEWS SIGNAL (aggregated from today's analyzed articles, weighted by
 severity x FX-relevance; score > 0 means COP strengthens => USD/COP DOWN):
@@ -607,35 +1062,55 @@ temper confidence — do not treat it as a third signal to echo:
 Current rate: 1 USD = {latest:,.2f} COP ({change:+.2f}% vs 30 days ago).
 
 Rules of reasoning — in this order:
-1. State whether the signals agree, diverge, or one abstains (partial),
-   BEFORE choosing a direction.
-2. If they diverge, explain which signal should dominate and WHY (e.g. a
-   high-severity news shock can override a mild technical trend; a strong
-   trend can override weak, low-relevance news).
-3. devils_advocate: build the STRONGEST case against your chosen direction.
-   If you cannot rebut it convincingly, lower your confidence.
-4. Calibrate: divergence caps confidence at 0.5 (enforced by code);
-   confidence below 0.35 turns the call neutral (enforced). Abstaining
-   (neutral) is a valid, professional answer — never fake conviction.
-5. rationale must cite the specific drivers/headlines and the forecast sign.
-6. caveats: data gaps, single-source bias, stale articles, model disagreement.
-7. Write rationale, devils_advocate and caveats in SPANISH.
+1. First classify the relationship between news_signal and ts_signal:
+   agree, diverge, or partial. Do this before choosing a direction.
+2. Decide which signal dominates:
+   - news dominates only if the top story or aggregate news is fresh, specific,
+     high/medium relevance, and plausibly reprices USD/COP within the horizon.
+   - timeseries dominates only if the forecast sign is meaningful and not
+     contradicted by a stronger fresh shock.
+   - market dominates only as a tie-breaker or when news/TS are weak; do not
+     invent a third vote from DXY/Brent.
+   - none dominates when evidence is stale, mixed, weak, or contradictory.
+3. Direction MUST match dominant_signal. If dominant_signal=news, direction
+   must equal news_signal.direction. If timeseries, direction must equal
+   ts_signal.direction. If market, direction must equal market_context.direction.
+   If none, direction must be neutral. The code will correct contradictions.
+4. devils_advocate: build the strongest case against your chosen direction.
+   If that argument is not clearly weaker, lower confidence or abstain.
+5. Calibrate hard:
+   - divergence caps confidence at 0.5 (enforced by code);
+   - partial evidence should rarely exceed 0.6;
+   - confidence below 0.35 turns the call neutral (enforced);
+   - if Prophet and ARIMA disagree, penalize any timeseries-dominant verdict;
+   - neutral is a valid, professional answer.
+6. consistency_notes must explicitly state:
+   - the dominant signal selected;
+   - why the losing signal did not dominate;
+   - whether direction matches the dominant signal;
+   - any reason confidence was capped.
+7. rationale must cite specific drivers/headlines and the forecast sign. Do not
+   make claims that are not in the provided signals.
+8. Write rationale, devils_advocate, consistency_notes and caveats in SPANISH
+   only. Do not use English or other languages except proper nouns, tickers and
+   institution names.
 """
 
 
-def _fallback_call(
-    news: NewsSignal, ts: TimeSeriesSignal, horizon: int
-) -> DirectionalCall:
+def _fallback_call(news: NewsSignal, ts: TimeSeriesSignal, horizon: int) -> DirectionalCall:
     """Reconciliación determinista cuando el adjudicador LLM no está disponible."""
     if news.direction == ts.direction:
         reconciliation, direction = "agree", news.direction
         confidence = 0.6 if news.direction != "neutral" else 0.4
+        dominant_signal = "news" if news.direction != "neutral" else "none"
     elif "neutral" in (news.direction, ts.direction):
         reconciliation = "partial"
         direction = news.direction if ts.direction == "neutral" else ts.direction
         confidence = 0.45
+        dominant_signal = "news" if ts.direction == "neutral" else "timeseries"
     else:
         reconciliation, direction, confidence = "diverge", "neutral", 0.3
+        dominant_signal = "none"
 
     return DirectionalCall(
         direction=direction,
@@ -644,6 +1119,8 @@ def _fallback_call(
         news_signal=news,
         ts_signal=ts,
         reconciliation=reconciliation,  # type: ignore[arg-type]
+        dominant_signal=dominant_signal,  # type: ignore[arg-type]
+        consistency_notes=["Fallback determinista sin adjudicador LLM."],
         rationale=(
             f"Fallback determinista: noticias={news.direction} (score {news.score}), "
             f"serie={ts.direction} ({ts.yhat_delta_pct:+.2f}%)."
@@ -653,6 +1130,107 @@ def _fallback_call(
             "tratar este veredicto con cautela adicional."
         ),
         caveats=["Adjudicador LLM no disponible — reconciliación por reglas fijas."],
+    )
+
+
+def _market_direction(raw_market: dict[str, object] | None) -> Direction:
+    if not raw_market:
+        return "neutral"
+    value = raw_market.get("direction", "neutral")
+    if value in {"down", "up", "neutral"}:
+        return cast("Direction", value)
+    return "neutral"
+
+
+def _expected_reconciliation(
+    news: NewsSignal, ts: TimeSeriesSignal
+) -> Literal["agree", "diverge", "partial"]:
+    if news.direction == ts.direction:
+        return "agree"
+    if "neutral" in (news.direction, ts.direction):
+        return "partial"
+    return "diverge"
+
+
+def _direction_for_dominant_signal(
+    dominant_signal: DominantSignal,
+    news: NewsSignal,
+    ts: TimeSeriesSignal,
+    market_direction: Direction,
+) -> Direction:
+    if dominant_signal == "news":
+        return news.direction
+    if dominant_signal == "timeseries":
+        return ts.direction
+    if dominant_signal == "market":
+        return market_direction
+    return "neutral"
+
+
+def _coherent_directional_call(
+    *,
+    verdict: AdjudicatorVerdict,
+    news: NewsSignal,
+    ts: TimeSeriesSignal,
+    market: MarketSignal | None,
+    horizon: int,
+) -> DirectionalCall:
+    """Build a DirectionalCall and fix structural contradictions deterministically."""
+    expected_reconciliation = _expected_reconciliation(news, ts)
+    market_direction = market.direction if market is not None else "neutral"
+    dominant_signal = verdict.dominant_signal
+    notes = list(verdict.consistency_notes)
+
+    if expected_reconciliation != verdict.reconciliation:
+        notes.append(
+            "Reconciliacion corregida por codigo: "
+            f"{verdict.reconciliation} -> {expected_reconciliation}."
+        )
+
+    expected_direction = _direction_for_dominant_signal(dominant_signal, news, ts, market_direction)
+    direction = verdict.direction
+    confidence = verdict.confidence
+
+    if expected_direction == "neutral":
+        if direction != "neutral":
+            notes.append("Direccion corregida a neutral porque la senal dominante no decide.")
+        direction = "neutral"
+        confidence = min(confidence, 0.45)
+        dominant_signal = "none"
+    elif direction != expected_direction:
+        notes.append(
+            "Direccion corregida por coherencia con la senal dominante "
+            f"{dominant_signal}: {direction} -> {expected_direction}."
+        )
+        direction = expected_direction
+        confidence = min(confidence, 0.5)
+
+    if expected_reconciliation == "agree" and direction != news.direction:
+        notes.append("Direccion corregida porque noticias y serie concuerdan.")
+        direction = news.direction
+        dominant_signal = "news" if news.direction != "neutral" else "none"
+
+    if (
+        expected_reconciliation == "diverge"
+        and dominant_signal == "timeseries"
+        and not ts.models_agree
+    ):
+        notes.append("Confianza limitada: la serie domina aunque Prophet y ARIMA difieren.")
+        confidence = min(confidence, 0.45)
+
+    return DirectionalCall(
+        direction=direction,
+        confidence=confidence,
+        horizon_days=horizon,
+        news_signal=news,
+        ts_signal=ts,
+        market_signal=market,
+        reconciliation=expected_reconciliation,
+        dominant_signal=dominant_signal,
+        consistency_notes=notes,
+        rationale=verdict.rationale,
+        devils_advocate=verdict.devils_advocate,
+        caveats=verdict.caveats,
     )
 
 
@@ -679,6 +1257,7 @@ def adjudicate(state: PipelineState) -> PipelineState:
     )
 
     market = state.get("market_signal") or {}
+    market_model = MarketSignal.model_validate(market) if market else None
     top_story = state.get("top_story") or {}
     prompt = _ADJUDICATOR_PROMPT.format(
         horizon=horizon,
@@ -692,18 +1271,17 @@ def adjudicate(state: PipelineState) -> PipelineState:
     )
 
     try:
-        llm = get_chat_model("judge", temperature=0.0).with_structured_output(
-            AdjudicatorVerdict
-        )
+        llm = get_chat_model("judge", temperature=0.0).with_structured_output(AdjudicatorVerdict)
         raw = llm.invoke(prompt)
         verdict = (
             raw if isinstance(raw, AdjudicatorVerdict) else AdjudicatorVerdict.model_validate(raw)
         )
-        call = DirectionalCall(
-            horizon_days=horizon,
-            news_signal=news,
-            ts_signal=ts,
-            **verdict.model_dump(),
+        call = _coherent_directional_call(
+            verdict=verdict,
+            news=news,
+            ts=ts,
+            market=market_model,
+            horizon=horizon,
         )
     except Exception as exc:
         logger.warning("adjudicate LLM failed (%s) — deterministic fallback", exc)
@@ -721,6 +1299,7 @@ def adjudicate(state: PipelineState) -> PipelineState:
 # ---------------------------------------------------------------------------
 # Node: record_prediction  (Etapa 5 — cerrar el loop predicción → realidad)
 # ---------------------------------------------------------------------------
+
 
 def record_prediction(state: PipelineState) -> PipelineState:
     """Persiste el DirectionalCall del día y evalúa predicciones pendientes.
@@ -742,6 +1321,7 @@ def record_prediction(state: PipelineState) -> PipelineState:
             run_date=state.get("run_date", date.today().isoformat()),
             latest_rate=float(latest) if latest else None,
             top_story=state.get("top_story") or None,
+            market_signal=state.get("market_signal") or None,
         )
         fx_df = state.get("fx_df")
         if fx_df is not None and not fx_df.empty:
@@ -756,6 +1336,7 @@ def record_prediction(state: PipelineState) -> PipelineState:
 # Node: generate_report
 # ---------------------------------------------------------------------------
 
+
 def generate_report(state: PipelineState) -> PipelineState:
     """Compose a Markdown intelligence report and persist it to disk."""
     run_date = state.get("run_date", date.today().isoformat())
@@ -769,18 +1350,19 @@ def generate_report(state: PipelineState) -> PipelineState:
         rows = []
         for _, row in ensemble.iterrows():
             rows.append(
-                f"| {row['ds'].strftime('%Y-%m-%d')} "
-                f"| {row['yhat']:.2f} "
-                f"| {row['yhat_lower']:.2f} – {row['yhat_upper']:.2f} |"
+                f"| {row['ds'].strftime('%Y-%m-%d')} | {row['yhat']:.2f} "
+                f"| {row['yhat_lower']:.2f} - {row['yhat_upper']:.2f} |"
             )
-        forecast_table = (
-            "| Date | Forecast | 95% CI |\n"
-            "|------|----------|--------|\n" + "\n".join(rows)
+        forecast_table = "| Date | Forecast | 95% CI |\n|------|----------|--------|\n" + "\n".join(
+            rows
         )
 
     metrics_section = ""
     for m in state.get("eval_metrics", []):
-        metrics_section += f"- **{m.model_name.upper()}**: MAE={m.mae:.2f}, RMSE={m.rmse:.2f}, MAPE={m.mape:.2f}%\n"
+        metrics_section += (
+            f"- **{m.model_name.upper()}**: MAE={m.mae:.2f}, "
+            f"RMSE={m.rmse:.2f}, MAPE={m.mape:.2f}%\n"
+        )
 
     call = state.get("directional_call")
     call_emoji = ""
@@ -795,6 +1377,8 @@ def generate_report(state: PipelineState) -> PipelineState:
         drivers = "".join(f"\n- {d}" for d in call["news_signal"]["drivers"])
         caveats = "".join(f"\n- {c}" for c in call["caveats"])
         market = state.get("market_signal") or {}
+        dominant = call.get("dominant_signal", "none")
+        consistency_notes = "".join(f"\n- {note}" for note in call.get("consistency_notes", []))
         market_line = ""
         if market:
             market_line = (
@@ -806,13 +1390,21 @@ def generate_report(state: PipelineState) -> PipelineState:
         top = state.get("top_story") or {}
         top_story_section = ""
         if top:
+            display_title = top.get("display_title") or top["title"]
+            original_note = (
+                f"\n\n*Titular original:* {top['title']}"
+                if display_title != top["title"]
+                else ""
+            )
             top_story_section = (
-                f"**📌 Noticia del día:** {top['title']} ({top['source']})\n\n"
+                f"**📌 Noticia del día:** {display_title} ({top['source']})"
+                f"{original_note}\n\n"
                 f"*Por qué importa:* {top['why_it_matters']}\n\n"
                 f"*Vigilar:* {top['watch_next']}\n\n"
             )
         verdict_section = f"""## Directional Call — {call["horizon_days"]} días
-**{labels[call["direction"]]}** · confianza **{call["confidence"]:.2f}** · reconciliación **{call["reconciliation"]}**
+**{labels[call["direction"]]}** · confianza **{call["confidence"]:.2f}** · \
+reconciliación **{call["reconciliation"]}** · domina **{dominant}**
 
 Señales: noticias = {call["news_signal"]["direction"]} (score {call["news_signal"]["score"]}) · \
 serie = {call["ts_signal"]["direction"]} ({call["ts_signal"]["yhat_delta_pct"]:+.2f}%, \
@@ -821,6 +1413,8 @@ modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
 {market_line}{top_story_section}**Racional:** {call["rationale"]}
 
 **Abogado del diablo:** {call["devils_advocate"]}
+
+**Checks de coherencia:**{consistency_notes or " OK"}
 
 **Drivers:**{drivers or " (sin drivers de alta severidad)"}
 
@@ -863,20 +1457,40 @@ modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
             f"{call_emoji} Señal {call['horizon_days']}d: {call['direction'].upper()} "
             f"(confianza {call['confidence']:.0%})\n"
         )
-    tweet = (
-        f"COP/USD — {run_date}\n"
-        f"💵 1 USD = {latest:,.0f} COP ({change:+.1f}% 30d)\n"
-        f"{call_line}"
-        f"{narrative[:100]}...\n"
-        f"#COP #Dólar #Colombia"
-    )[:280]
+    top = state.get("top_story") or {}
+    top_title = str(top.get("display_title") or top.get("title", "")).strip()
+    top_source = str(top.get("source", "")).strip()
+    top_line = ""
+    if top_title:
+        story = f"{top_title} ({top_source})" if top_source else top_title
+        top_line = f"Noticia clave: {_shorten(story, 105)}\n"
+
+    tweet = _shorten(
+        (
+            f"COP/USD — {run_date}\n"
+            f"💵 1 USD = {latest:,.0f} COP ({change:+.1f}% 30d)\n"
+            f"{call_line}"
+            f"{top_line}"
+            f"#COP #Dólar #Colombia"
+        ),
+        280,
+    )
 
     return {"report_markdown": report, "report_path": report_path, "tweet_text": tweet}
+
+
+def _shorten(text: str, max_chars: int) -> str:
+    """Trim text without breaking the 280-char Twitter/X limit."""
+    clean = " ".join(text.split())
+    if len(clean) <= max_chars:
+        return clean
+    return clean[: max_chars - 1].rstrip() + "…"
 
 
 # ---------------------------------------------------------------------------
 # Node: publish
 # ---------------------------------------------------------------------------
+
 
 def publish(state: PipelineState) -> PipelineState:
     """Post the daily tweet (only when twitter_enabled=True)."""
@@ -896,14 +1510,32 @@ def publish(state: PipelineState) -> PipelineState:
         import tweepy
 
         client = tweepy.Client(
-            bearer_token=settings.twitter_bearer_token.get_secret_value() if settings.twitter_bearer_token else None,
-            consumer_key=settings.twitter_api_key.get_secret_value() if settings.twitter_api_key else None,
-            consumer_secret=settings.twitter_api_secret.get_secret_value() if settings.twitter_api_secret else None,
-            access_token=settings.twitter_access_token.get_secret_value() if settings.twitter_access_token else None,
-            access_token_secret=settings.twitter_access_token_secret.get_secret_value() if settings.twitter_access_token_secret else None,
+            bearer_token=(
+                settings.twitter_bearer_token.get_secret_value()
+                if settings.twitter_bearer_token
+                else None
+            ),
+            consumer_key=(
+                settings.twitter_api_key.get_secret_value() if settings.twitter_api_key else None
+            ),
+            consumer_secret=(
+                settings.twitter_api_secret.get_secret_value()
+                if settings.twitter_api_secret
+                else None
+            ),
+            access_token=(
+                settings.twitter_access_token.get_secret_value()
+                if settings.twitter_access_token
+                else None
+            ),
+            access_token_secret=(
+                settings.twitter_access_token_secret.get_secret_value()
+                if settings.twitter_access_token_secret
+                else None
+            ),
         )
         resp = client.create_tweet(text=tweet_text)
-        tweet_id = str(resp.data["id"])  # type: ignore[index]
+        tweet_id = str(resp.data["id"])
         logger.info("Tweet published: %s", tweet_id)
         return {"tweet_id": tweet_id}
     except Exception as exc:

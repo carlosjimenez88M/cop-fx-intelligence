@@ -19,7 +19,9 @@ _HTML = """
   <p>Foto: archivo</p>
   <p>Analistas consultados esperaban un recorte de 25 puntos básicos, por lo que
   la decisión sorprendió al mercado cambiario y fortaleció al peso.</p>
-  <figure><figcaption>El gerente del banco durante la rueda de prensa con periodistas</figcaption></figure>
+  <figure>
+    <figcaption>El gerente del banco durante la rueda de prensa con periodistas</figcaption>
+  </figure>
 </article>
 <footer><p>Términos y condiciones del sitio web con texto legal extenso aquí</p></footer>
 </body></html>
@@ -31,10 +33,10 @@ def test_extract_body_keeps_article_paragraphs_only() -> None:
     body = article_body.extract_body_from_html(_HTML)
     assert "Banco de la República" in body
     assert "sorprendió al mercado" in body
-    assert "Foto: archivo" not in body          # migaja corta descartada
-    assert "navegación" not in body              # nav eliminado
+    assert "Foto: archivo" not in body  # migaja corta descartada
+    assert "navegación" not in body  # nav eliminado
     assert "Términos y condiciones" not in body  # footer eliminado
-    assert "rueda de prensa" not in body         # figcaption eliminado
+    assert "rueda de prensa" not in body  # figcaption eliminado
 
 
 @pytest.mark.unit()
@@ -47,8 +49,11 @@ def test_extract_body_respects_max_chars() -> None:
 def test_attach_bodies_mutates_articles_and_skips_existing() -> None:
     def art(title: str, body: str = "") -> Article:
         a = Article(
-            title=title, summary="", url=f"https://x.com/{title}",
-            published_at=datetime.now(tz=UTC), source="Test",
+            title=title,
+            summary="",
+            url=f"https://x.com/{title}",
+            published_at=datetime.now(tz=UTC),
+            source="Test",
         )
         a.body = body
         return a
@@ -58,7 +63,7 @@ def test_attach_bodies_mutates_articles_and_skips_existing() -> None:
         fetched = article_body.attach_bodies(articles)
 
     assert fetched == 2
-    assert mock.call_count == 2                  # el que ya tenía body no se re-descarga
+    assert mock.call_count == 2  # el que ya tenía body no se re-descarga
     assert articles[0].body == "cuerpo nuevo"
     assert articles[1].body == "ya lo tengo"
 
@@ -66,8 +71,11 @@ def test_attach_bodies_mutates_articles_and_skips_existing() -> None:
 @pytest.mark.unit()
 def test_attach_bodies_tolerates_fetch_failure() -> None:
     a = Article(
-        title="x", summary="resumen original", url="https://x.com/x",
-        published_at=datetime.now(tz=UTC), source="Test",
+        title="x",
+        summary="resumen original",
+        url="https://x.com/x",
+        published_at=datetime.now(tz=UTC),
+        source="Test",
     )
     with patch.object(article_body, "fetch_article_body", return_value=""):
         fetched = article_body.attach_bodies([a])

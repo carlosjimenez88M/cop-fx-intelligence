@@ -29,6 +29,8 @@ def _call(**overrides: object) -> DirectionalCall:
         "confidence": 0.7,
         "horizon_days": 5,
         "reconciliation": "agree",
+        "dominant_signal": "news",
+        "consistency_notes": [],
         "rationale": "Noticias y serie concuerdan en fortalecimiento del COP.",
         "devils_advocate": "El DXY podría repuntar tras el dato de empleo de EE.UU.",
         "caveats": [],
@@ -55,6 +57,13 @@ def test_divergence_caps_confidence_at_half() -> None:
 def test_low_confidence_forces_abstention() -> None:
     call = _call(confidence=0.2)
     assert call.direction == "neutral"
+
+
+@pytest.mark.unit()
+def test_no_dominant_signal_forces_abstention() -> None:
+    call = _call(dominant_signal="none", confidence=0.8)
+    assert call.direction == "neutral"
+    assert call.confidence == 0.45
 
 
 @pytest.mark.unit()
@@ -140,7 +149,7 @@ def _analysis(
 def test_aggregate_news_signal_directions() -> None:
     bullish = [_analysis(0, True, "high"), _analysis(1, True, "medium")]
     signal = aggregate_news_signal(bullish, {0: "Brent sube"})
-    assert signal.direction == "down"  # COP fuerte ⇒ USD/COP cae
+    assert signal.direction == "down"  # COP fuerte => USD/COP cae
     assert signal.drivers == ["Brent sube"]
 
     bearish = [_analysis(0, False, "high"), _analysis(1, False, "high")]

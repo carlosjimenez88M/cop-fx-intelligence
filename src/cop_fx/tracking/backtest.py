@@ -92,9 +92,7 @@ def directional_backtest(
         decided = detail[detail[strategy] != "neutral"]
         summary[strategy] = {
             "hit_rate": (
-                float((decided[strategy] == decided["actual"]).mean())
-                if len(decided)
-                else None
+                float((decided[strategy] == decided["actual"]).mean()) if len(decided) else None
             ),
             "n_decided": len(decided),
             "n_abstained": int((detail[strategy] == "neutral").sum()),

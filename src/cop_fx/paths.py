@@ -16,9 +16,7 @@ from pathlib import Path
 
 # src/cop_fx/paths.py → parents[2] == raíz del repo (instalación editable)
 _candidate = Path(__file__).resolve().parents[2]
-PROJECT_ROOT: Path = (
-    _candidate if (_candidate / "pyproject.toml").exists() else Path.cwd()
-)
+PROJECT_ROOT: Path = _candidate if (_candidate / "pyproject.toml").exists() else Path.cwd()
 
 DATA_DIR: Path = PROJECT_ROOT / "data"
 REPORTS_DIR: Path = PROJECT_ROOT / "reports"

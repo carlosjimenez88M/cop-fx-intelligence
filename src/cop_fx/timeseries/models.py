@@ -113,9 +113,9 @@ def ensemble_forecast(results: list[ForecastResult]) -> pd.DataFrame:
         raise ValueError("No forecast results to ensemble")
 
     base = results[0].forecast[["ds"]].copy()
-    yhats = np.column_stack([r.forecast["yhat"].values for r in results])
-    lower = np.column_stack([r.forecast["yhat_lower"].values for r in results])
-    upper = np.column_stack([r.forecast["yhat_upper"].values for r in results])
+    yhats = np.column_stack([r.forecast["yhat"].to_numpy(dtype=float) for r in results])
+    lower = np.column_stack([r.forecast["yhat_lower"].to_numpy(dtype=float) for r in results])
+    upper = np.column_stack([r.forecast["yhat_upper"].to_numpy(dtype=float) for r in results])
 
     base["yhat"] = yhats.mean(axis=1)
     base["yhat_lower"] = lower.min(axis=1)

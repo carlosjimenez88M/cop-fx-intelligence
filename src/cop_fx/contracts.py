@@ -29,31 +29,31 @@ from typing import Literal
 from pydantic import BaseModel, Field, model_validator
 
 Topic = Literal[
-    "monetary_policy",      # BanRep, tasas, inflación
-    "fiscal_policy",        # presupuesto, reforma tributaria, déficit, deuda pública
-    "trade",                # exportaciones / importaciones / aranceles / balanza
-    "political_risk",       # elecciones, gobernabilidad, regulación, instituciones
-    "security_conflict",    # orden público, conflicto armado, narcotráfico
-    "energy_commodities",   # petróleo, carbón, gas, minería, energía
-    "agro_commodities",     # café, alimentos, sector agro
-    "public_health",        # epidemias, sistema de salud, crisis sanitarias
+    "monetary_policy",  # BanRep, tasas, inflación
+    "fiscal_policy",  # presupuesto, reforma tributaria, déficit, deuda pública
+    "trade",  # exportaciones / importaciones / aranceles / balanza
+    "political_risk",  # elecciones, gobernabilidad, regulación, instituciones
+    "security_conflict",  # orden público, conflicto armado, narcotráfico
+    "energy_commodities",  # petróleo, carbón, gas, minería, energía
+    "agro_commodities",  # café, alimentos, sector agro
+    "public_health",  # epidemias, sistema de salud, crisis sanitarias
     "environment_climate",  # clima, El Niño/La Niña, desastres, transición energética
-    "labor_social",         # empleo, huelgas, paros, protesta social
-    "financial_markets",    # bolsa, deuda, calificadoras, flujos de portafolio
-    "us_global_macro",      # Fed, dólar global (DXY), economía mundial
-    "sports",               # deportes
-    "culture_society",      # cultura, entretenimiento, sociedad
+    "labor_social",  # empleo, huelgas, paros, protesta social
+    "financial_markets",  # bolsa, deuda, calificadoras, flujos de portafolio
+    "us_global_macro",  # Fed, dólar global (DXY), economía mundial
+    "sports",  # deportes
+    "culture_society",  # cultura, entretenimiento, sociedad
     "other",
 ]
 
 FxChannel = Literal[
-    "interest_rates",   # diferencial de tasas COP vs USD
-    "inflation",        # presión de precios → respuesta esperada del BanRep
-    "terms_of_trade",   # precio de lo que Colombia exporta/importa
-    "country_risk",     # prima de riesgo, percepción institucional
-    "capital_flows",    # IED, flujos de portafolio, remesas
-    "growth",           # actividad económica / PIB
-    "none",             # sin mecanismo de transmisión al FX
+    "interest_rates",  # diferencial de tasas COP vs USD
+    "inflation",  # presión de precios → respuesta esperada del BanRep
+    "terms_of_trade",  # precio de lo que Colombia exporta/importa
+    "country_risk",  # prima de riesgo, percepción institucional
+    "capital_flows",  # IED, flujos de portafolio, remesas
+    "growth",  # actividad económica / PIB
+    "none",  # sin mecanismo de transmisión al FX
 ]
 
 FxRelevance = Literal["direct", "indirect", "none"]
@@ -64,6 +64,9 @@ Severity = Literal["high", "medium", "low"]
 
 Direction = Literal["down", "up", "neutral"]
 """down = USD/COP cae (COP se fortalece) · up = USD/COP sube · neutral = abstención."""
+
+DominantSignal = Literal["news", "timeseries", "market", "none"]
+"""Señal que justifica la dirección final. `none` fuerza abstención profesional."""
 
 # Pesos para agregar señales de noticias
 SEVERITY_WEIGHT: dict[str, float] = {"high": 1.0, "medium": 0.5, "low": 0.2}
@@ -86,9 +89,7 @@ class ArticleAnalysis(BaseModel):
     fx_relevance: FxRelevance = Field(
         description="¿La noticia tiene un canal de transmisión al USD/COP?"
     )
-    fx_channel: FxChannel = Field(
-        description="El mecanismo por el que la noticia mueve el USD/COP"
-    )
+    fx_channel: FxChannel = Field(description="El mecanismo por el que la noticia mueve el USD/COP")
     severity: Severity = Field(description="Magnitud esperada del impacto sobre el USD/COP")
     bullish_cop: bool = Field(description="True si la noticia tiende a fortalecer el COP")
     reasoning: str = Field(max_length=240, description="≤ 20 palabras justificando el veredicto")
@@ -141,17 +142,20 @@ class TopStory(BaseModel):
 
     El agente solo ELIGE entre candidatos ya analizados y justifica; los
     hechos (título, fuente, canal) los inyecta el sistema desde el artículo
-    elegido. Importancia = severidad × canal de transmisión × novedad
+    elegido. Importancia = severidad x canal de transmision x novedad
     (un shock estructural le gana al ruido rutinario).
     """
 
     chosen_index: int = Field(ge=0, description="Índice del candidato elegido en la lista")
+    spanish_title: str = Field(
+        min_length=10,
+        max_length=180,
+        description="Titular editorial en español, fiel al título original",
+    )
     why_it_matters: str = Field(
         min_length=30, description="Por qué ES la noticia del día (en español)"
     )
-    watch_next: str = Field(
-        min_length=10, description="Qué vigilar a continuación (en español)"
-    )
+    watch_next: str = Field(min_length=10, description="Qué vigilar a continuación (en español)")
 
 
 class NewsSignal(BaseModel):
@@ -159,7 +163,7 @@ class NewsSignal(BaseModel):
 
     direction: Direction
     score: float = Field(
-        description="Σ ±(peso_severity × peso_relevance); > 0 ⇒ COP se fortalece"
+        description="sum +/- peso_severity x peso_relevance; > 0 => COP se fortalece"
     )
     drivers: list[str] = Field(
         default_factory=list,
@@ -203,6 +207,13 @@ class AdjudicatorVerdict(BaseModel):
     direction: Direction
     confidence: float = Field(ge=0.0, le=1.0)
     reconciliation: Literal["agree", "diverge", "partial"]
+    dominant_signal: DominantSignal = Field(
+        description="La señal que domina el veredicto final; none => neutral"
+    )
+    consistency_notes: list[str] = Field(
+        default_factory=list,
+        description="Checks explícitos de coherencia entre señales, dirección y racional",
+    )
     rationale: str = Field(description="Cadena de razonamiento que cita los drivers")
     devils_advocate: str = Field(
         min_length=20,
@@ -224,7 +235,10 @@ class DirectionalCall(BaseModel):
     horizon_days: int = Field(ge=1, le=30)
     news_signal: NewsSignal
     ts_signal: TimeSeriesSignal
+    market_signal: MarketSignal | None = None
     reconciliation: Literal["agree", "diverge", "partial"]
+    dominant_signal: DominantSignal = "none"
+    consistency_notes: list[str] = Field(default_factory=list)
     rationale: str = Field(description="Cadena de razonamiento que cita los drivers")
     devils_advocate: str = Field(
         min_length=20,
@@ -236,6 +250,11 @@ class DirectionalCall(BaseModel):
     def _bound_rationality(self) -> DirectionalCall:
         if self.reconciliation == "diverge" and self.confidence > 0.5:
             self.confidence = 0.5
+        if self.reconciliation == "partial" and self.confidence > 0.6:
+            self.confidence = 0.6
+        if self.dominant_signal == "none":
+            self.direction = "neutral"
+            self.confidence = min(self.confidence, 0.45)
         if self.direction != "neutral" and self.confidence < 0.35:
             self.direction = "neutral"
         return self
@@ -249,7 +268,7 @@ def aggregate_news_signal(
 ) -> NewsSignal:
     """Agrega veredictos por artículo en una señal direccional — determinista, sin LLM.
 
-    score = Σ ±(peso_severity × peso_relevance); positivo si bullish_cop.
+    score = sum +/- peso_severity x peso_relevance; positivo si bullish_cop.
     Artículos con fx_relevance="none" pesan 0 por construcción.
     |score| ≤ threshold ⇒ neutral.
     """
@@ -267,7 +286,7 @@ def aggregate_news_signal(
 
     direction: Direction
     if score > threshold:
-        direction = "down"   # COP se fortalece ⇒ USD/COP cae
+        direction = "down"  # COP se fortalece ⇒ USD/COP cae
     elif score < -threshold:
         direction = "up"
     else:

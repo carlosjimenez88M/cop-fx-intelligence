@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -12,6 +13,9 @@ from cop_fx.agents.graph import run_pipeline
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
 from cop_fx.contracts import AdjudicatorVerdict, HeadlineTag, MaterialityGate, TopStory
 from cop_fx.data.news_fetcher import Article
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> MagicMock:
@@ -33,6 +37,7 @@ def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> Ma
         ),
         TopStory: TopStory(
             chosen_index=0,
+            spanish_title="Déficit comercial presiona la cuenta externa",
             why_it_matters="El déficit comercial amplía la presión sobre la cuenta externa.",
             watch_next="La próxima publicación del DANE.",
         ),
@@ -40,6 +45,8 @@ def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> Ma
             direction="up",
             confidence=0.65,
             reconciliation="agree",
+            dominant_signal="news",
+            consistency_notes=["mock consistency"],
             rationale="Noticias bajistas para el COP y serie al alza.",
             devils_advocate="Un rebote del Brent revertiría la presión sobre el peso.",
             caveats=["mock"],
@@ -73,20 +80,24 @@ def synthetic_fx_df() -> pd.DataFrame:
 
 
 @pytest.mark.integration()
-def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path: Path) -> None:
     fake_articles = [
         Article(
             title="Colombia registra déficit comercial",
-            summary=("El déficit comercial se amplió en abril según el DANE, presionado "
-                     "por mayores importaciones de bienes de capital y menores ventas externas."),
+            summary=(
+                "El déficit comercial se amplió en abril según el DANE, presionado "
+                "por mayores importaciones de bienes de capital y menores ventas externas."
+            ),
             url="https://example.com/news/1",
             published_at=datetime.now(tz=UTC),
             source="El Tiempo",
         ),
         Article(
             title="Petróleo cae 3% por temores de recesión",
-            summary=("Los precios del petróleo cayeron más de tres por ciento presionados por "
-                     "débiles datos económicos de Estados Unidos y mayores inventarios de crudo."),
+            summary=(
+                "Los precios del petróleo cayeron más de tres por ciento presionados por "
+                "débiles datos económicos de Estados Unidos y mayores inventarios de crudo."
+            ),
             url="https://example.com/news/2",
             published_at=datetime.now(tz=UTC),
             source="Portafolio",
@@ -132,7 +143,7 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
         ),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
         patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
-        patch("cop_fx.agents.nodes.attach_bodies"),    # sin red en tests
+        patch("cop_fx.agents.nodes.attach_bodies"),  # sin red en tests
         patch(
             "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
             side_effect=lambda symbol, lookback_days=30: pd.DataFrame(
@@ -169,7 +180,8 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
 
     # Regresión: el adjudicador (nodo deferred) debe ejecutarse EXACTAMENTE
     # una vez — un trigger extra hacia un nodo deferred lo dispara dos veces.
-    assert llm_calls.count(AdjudicatorVerdict) == 1, f"adjudicate ran {llm_calls.count(AdjudicatorVerdict)}x"
+    adjudicator_runs = llm_calls.count(AdjudicatorVerdict)
+    assert adjudicator_runs == 1, f"adjudicate ran {adjudicator_runs}x"
 
     # No catastrophic errors
     errors = final_state.get("errors", [])
@@ -183,7 +195,7 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
 
 
 @pytest.mark.integration()
-def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_path: Path) -> None:
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
@@ -191,7 +203,7 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         patch("cop_fx.agents.nodes.get_chat_model", return_value=_llm_by_schema()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
         patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
-        patch("cop_fx.agents.nodes.attach_bodies"),    # sin red en tests
+        patch("cop_fx.agents.nodes.attach_bodies"),  # sin red en tests
         patch(
             "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
             side_effect=lambda symbol, lookback_days=30: pd.DataFrame(

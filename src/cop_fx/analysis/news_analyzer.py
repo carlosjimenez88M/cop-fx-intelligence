@@ -18,6 +18,7 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
+
 @dataclass
 class AnalyzedArticle:
     article: Article
@@ -39,7 +40,20 @@ class NewsAnalysis:
     narrative: str
 
 
-_PROMPT_TEMPLATE = """You are a Colombian FX market analyst.
+_PROMPT_TEMPLATE = """You are a skeptical Colombian FX transmission analyst.
+
+Your job is not to summarize news. Your job is to decide whether the FULL
+article contains a plausible, near-term transmission channel into USD/COP.
+Be conservative: most articles are noise, repeated information, or too local
+to move the exchange rate. A strong answer names the mechanism, the surprise
+relative to normal market expectations, and the sign for COP.
+
+All natural-language fields must be in Spanish only. Do not use English or
+other languages except proper nouns, tickers and institution names.
+The target is Colombia's peso against the US dollar. Do not classify generic
+global macro as material unless it has one of these explicit bridges:
+Colombia/COP, Fed/US macro/USD leg, oil or other terms of trade, Colombia/EM
+capital flows, or country-risk repricing.
 
 Each item below contains the article TITLE and its full TEXT (when a body
 could not be retrieved you will see "(solo titular disponible)" — be more
@@ -65,8 +79,29 @@ what the news IS (`topic`) and HOW it transmits to the USD/COP rate
   - bullish_cop: true if the news is likely to strengthen COP vs USD
   - reasoning: <= 20 words naming the channel explicitly
 
+Calibration rules:
+  - high = fresh, specific, credible shock with direct FX channel and likely
+    repricing within 1-7 business days (BanRep surprise, fiscal rule breach,
+    oil shock, ratings action, Fed surprise, large country-risk event).
+  - medium = relevant but partly expected, second-order, or mixed evidence.
+  - low = routine, stale, narrow sector story, or weak channel.
+  - none = no actionable USD/COP mechanism. Do not force an economic label.
+  - If the article is not about Colombia and is not about the USD leg, oil,
+    terms of trade, country risk or capital flows, set fx_relevance=none even
+    if it is economically interesting.
+  - If only a title/short summary is available, severity cannot be high unless
+    the headline itself describes a major policy, fiscal, oil, Fed, or risk shock.
+  - Do not double-count routine follow-ups as fresh shocks. Penalize recycled
+    stories unless the article adds a new fact that changes the FX view.
+  - Penalize long-dated policy announcements (for example taxes in 2027) unless
+    the article explains why markets should reprice USD/COP during the current
+    1-7 business day horizon.
+
 Also write `market_narrative`: 3 sentences on the day's FX outlook,
-based ONLY on the articles with fx_relevance != none.
+based ONLY on the articles with fx_relevance != none. It must state the
+dominant channels, the main conflict or uncertainty, and whether the news
+signal is strong enough to challenge a quantitative time-series signal.
+Write the narrative in Spanish only.
 
 ARTICLES:
 {digest}
@@ -92,8 +127,7 @@ class NewsAnalyzer:
             return full[:1800] if full else "(solo titular disponible)"
 
         digest = "\n\n".join(
-            f"[{i}] TITLE: {a.title}\nTEXT: {_text(a)}"
-            for i, a in enumerate(articles)
+            f"[{i}] TITLE: {a.title}\nTEXT: {_text(a)}" for i, a in enumerate(articles)
         )
 
         try:

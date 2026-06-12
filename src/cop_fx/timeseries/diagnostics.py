@@ -41,6 +41,7 @@ ALPHA = 0.05
 # 1. Estacionariedad
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class StationarityReport:
     adf_stat: float
@@ -70,7 +71,8 @@ def stationarity_tests(series: pd.Series) -> StationarityReport:
     elif not adf_says_stationary and not kpss_says_stationary:
         verdict, stationary = "NO estacionaria (ADF y KPSS concuerdan)", False
     else:
-        verdict, stationary = "ambigua (ADF y KPSS se contradicen) — diferenciar por prudencia", False
+        verdict = "ambigua (ADF y KPSS se contradicen) — diferenciar por prudencia"
+        stationary = False
 
     return StationarityReport(
         adf_stat=round(float(adf_stat), 4),
@@ -96,11 +98,12 @@ def suggest_d(series: pd.Series, max_d: int = 2) -> int:
 # 2. ACF / PACF
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class CorrelogramReport:
     acf: np.ndarray
     pacf: np.ndarray
-    conf_band: float                       # banda ±1.96/√n
+    conf_band: float  # banda ±1.96/√n
     significant_acf_lags: list[int] = field(default_factory=list)
     significant_pacf_lags: list[int] = field(default_factory=list)
 
@@ -124,6 +127,7 @@ def correlogram(series: pd.Series, nlags: int = 20) -> CorrelogramReport:
 # ---------------------------------------------------------------------------
 # 3. Selección de orden por AIC
 # ---------------------------------------------------------------------------
+
 
 def select_arima_order(
     df: pd.DataFrame,
@@ -149,8 +153,13 @@ def select_arima_order(
                 continue
             try:
                 fitted = ARIMA(y, order=(p, d_used, q)).fit()
-                rows.append({"order": (p, d_used, q), "aic": round(float(fitted.aic), 2),
-                             "bic": round(float(fitted.bic), 2)})
+                rows.append(
+                    {
+                        "order": (p, d_used, q),
+                        "aic": round(float(fitted.aic), 2),
+                        "bic": round(float(fitted.bic), 2),
+                    }
+                )
             except Exception as exc:
                 logger.warning("ARIMA(%d,%d,%d) no convergió: %s", p, d_used, q, exc)
 
@@ -165,6 +174,7 @@ def select_arima_order(
 # ---------------------------------------------------------------------------
 # 4. Diagnóstico de residuales
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class ResidualReport:

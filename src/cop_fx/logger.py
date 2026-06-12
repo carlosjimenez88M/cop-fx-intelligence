@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
-from typing import Any
+from typing import Any, TextIO
 
 # ---------------------------------------------------------------------------
 # ANSI escape codes
@@ -39,12 +39,12 @@ from typing import Any
 _RESET = "\033[0m"
 
 _COLOURS = {
-    "DEBUG": "\033[2;37m",      # dim white
-    "INFO": "\033[36m",         # cyan
-    "SUCCESS": "\033[32m",      # green
-    "WARNING": "\033[33m",      # yellow
-    "ERROR": "\033[31m",        # red
-    "CRITICAL": "\033[1;31m",   # bold bright red
+    "DEBUG": "\033[2;37m",  # dim white
+    "INFO": "\033[36m",  # cyan
+    "SUCCESS": "\033[32m",  # green
+    "WARNING": "\033[33m",  # yellow
+    "ERROR": "\033[31m",  # red
+    "CRITICAL": "\033[1;31m",  # bold bright red
 }
 
 # ---------------------------------------------------------------------------
@@ -66,6 +66,7 @@ logging.Logger.success = _success  # type: ignore[attr-defined]
 # ---------------------------------------------------------------------------
 # Coloured formatter
 # ---------------------------------------------------------------------------
+
 
 class _ColouredFormatter(logging.Formatter):
     """Adds ANSI colour codes around the level name and resets afterwards."""
@@ -96,10 +97,10 @@ class _ColouredFormatter(logging.Formatter):
 # Public factory
 # ---------------------------------------------------------------------------
 
-_handler: logging.StreamHandler | None = None  # single shared handler
+_handler: logging.StreamHandler[TextIO] | None = None  # single shared handler
 
 
-def _get_handler(stream=sys.stdout) -> logging.StreamHandler:
+def _get_handler(stream: TextIO = sys.stdout) -> logging.StreamHandler[TextIO]:
     global _handler
     if _handler is None:
         # Colours on by default; set NO_COLOR=1 to disable (POSIX convention).

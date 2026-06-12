@@ -11,6 +11,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from typing import ClassVar
 
 import feedparser
 import httpx
@@ -83,7 +84,16 @@ class CNNRSSParser:
     @staticmethod
     def _parse_date(entry: feedparser.FeedParserDict) -> datetime:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
-            return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+            parsed = entry.published_parsed
+            return datetime(
+                parsed.tm_year,
+                parsed.tm_mon,
+                parsed.tm_mday,
+                parsed.tm_hour,
+                parsed.tm_min,
+                parsed.tm_sec,
+                tzinfo=UTC,
+            )
         return datetime.now(tz=UTC)
 
 
@@ -137,9 +147,7 @@ class CNNHTMLParser:
 
     def _download(self, url: str) -> str:
         try:
-            with httpx.Client(
-                timeout=30, follow_redirects=True, headers=self._headers
-            ) as client:
+            with httpx.Client(timeout=30, follow_redirects=True, headers=self._headers) as client:
                 resp = client.get(url)
                 resp.raise_for_status()
             logger.success(  # type: ignore[attr-defined]
@@ -183,7 +191,7 @@ class CNNHTMLParser:
             title=title,
             url=url,
             published_at=self._date_from_url(url),
-            author="",   # enriched separately via fetch_author()
+            author="",  # enriched separately via fetch_author()
             summary="",
         )
 
@@ -214,14 +222,14 @@ class CNNColombiaFetcher:
 
     Usage::
 
-        fetcher = CNNColombiaFetcher(max_articles=30)
+        fetcher = CNNColombiaFetcher(max_articles=100)
         articles: list[CNNArticle] = fetcher.fetch()
     """
 
     _RSS_URL = "https://cnnespanol.cnn.com/colombia/feed/"
     _HTML_URL = "https://cnnespanol.cnn.com/colombia/"
     _FALLBACK_RSS = "https://cnnespanol.cnn.com/feed/"
-    _HEADERS: dict[str, str] = {
+    _HEADERS: ClassVar[dict[str, str]] = {
         "User-Agent": (
             "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
             "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
@@ -288,9 +296,7 @@ class CNNColombiaFetcher:
 
     # ------------------------------------------------------------------
 
-    def _deduplicate(
-        self, rss: list[CNNArticle], html: list[CNNArticle]
-    ) -> list[CNNArticle]:
+    def _deduplicate(self, rss: list[CNNArticle], html: list[CNNArticle]) -> list[CNNArticle]:
         seen: set[str] = set()
         merged: list[CNNArticle] = []
         for article in rss + html:

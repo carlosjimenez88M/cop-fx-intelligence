@@ -26,9 +26,7 @@ class Article(BaseModel):
     source: str = Field(description="Nombre legible de la fuente")
     country: Country = Field(description="CO = local, GLOBAL = lado USD/macro")
     published_at: datetime
-    fetched_at: datetime = Field(
-        default_factory=lambda: datetime.now(UTC)
-    )
+    fetched_at: datetime = Field(default_factory=lambda: datetime.now(UTC))
 
     @field_validator("published_at", "fetched_at")
     @classmethod

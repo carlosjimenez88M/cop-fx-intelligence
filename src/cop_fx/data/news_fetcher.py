@@ -133,8 +133,16 @@ class NewsFetcher:
     @staticmethod
     def _parse_rss_date(entry: feedparser.FeedParserDict) -> datetime:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
-
-            return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+            parsed = entry.published_parsed
+            return datetime(
+                parsed.tm_year,
+                parsed.tm_mon,
+                parsed.tm_mday,
+                parsed.tm_hour,
+                parsed.tm_min,
+                parsed.tm_sec,
+                tzinfo=UTC,
+            )
         return datetime.now(tz=UTC)
 
     # ------------------------------------------------------------------
@@ -142,7 +150,7 @@ class NewsFetcher:
     # ------------------------------------------------------------------
 
     def _fetch_newsapi(self, api_key: str) -> list[Article]:
-        params = {
+        params: dict[str, str | int] = {
             "q": "dólar Colombia peso COP USD tasa de cambio",
             "language": "es",
             "sortBy": "publishedAt",
@@ -161,9 +169,7 @@ class NewsFetcher:
         articles: list[Article] = []
         for item in data.get("articles", []):
             try:
-                published = datetime.fromisoformat(
-                    item["publishedAt"].replace("Z", "+00:00")
-                )
+                published = datetime.fromisoformat(item["publishedAt"].replace("Z", "+00:00"))
             except (KeyError, ValueError):
                 published = datetime.now(tz=UTC)
             articles.append(
