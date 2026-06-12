@@ -162,10 +162,9 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 @st.cache_data(show_spinner=False)
 def load_news_insights() -> dict[str, pd.DataFrame | str]:
-    """Load pipeline-computed keyword and co-occurrence insights."""
+    """Load pipeline-computed keyword insights."""
     empty = {
         "terms": pd.DataFrame(),
-        "pairs": pd.DataFrame(),
         "entities": pd.DataFrame(),
         "computed_at": "",
     }
