@@ -64,6 +64,9 @@ class ProphetForecaster:
 class ARIMAForecaster:
     """Wrapper around statsmodels ARIMA with auto-order fallback."""
 
+    # Orden por defecto respaldado por evidencia (notebooks/series_de_tiempo.ipynb):
+    # gana por BIC, deja residuales ruido-blanco (Ljung-Box p=1.0) y supera al
+    # ganador por AIC (2,1,3) en hit-rate direccional out-of-sample (52% vs 35%).
     def __init__(self, order: tuple[int, int, int] = (2, 1, 2)) -> None:
         self._order = order
 

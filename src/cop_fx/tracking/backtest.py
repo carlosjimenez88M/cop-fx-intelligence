@@ -36,6 +36,7 @@ def directional_backtest(
     horizon_days: int = 5,
     n_origins: int = 40,
     min_history: int = 120,
+    arima_order: tuple[int, int, int] = (2, 1, 2),
 ) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Rolling-origin: en cada día t, predice la dirección a t+horizon.
 
@@ -66,7 +67,9 @@ def directional_backtest(
         actual_dir = _direction((actual - latest) / latest * 100)
 
         try:
-            result = ARIMAForecaster().fit_predict(train, horizon_days=horizon_days)
+            result = ARIMAForecaster(order=arima_order).fit_predict(
+                train, horizon_days=horizon_days
+            )
             yhat = float(result.forecast["yhat"].iloc[-1])
             arima_dir = _direction((yhat - latest) / latest * 100)
         except Exception as exc:
