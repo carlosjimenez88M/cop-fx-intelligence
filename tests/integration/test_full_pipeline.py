@@ -9,6 +9,7 @@ import pandas as pd
 import pytest
 
 from cop_fx.agents.graph import run_pipeline
+from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
 from cop_fx.data.news_fetcher import Article
 
 
@@ -41,21 +42,35 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
         ),
     ]
 
-    llm_json = (
-        '[{"index":0,"topic":"trade","severity":"medium","bullish_cop":false,"reasoning":"deficit"},'
-        '{"index":1,"topic":"commodities","severity":"high","bullish_cop":false,"reasoning":"oil drop"}]'
+    mock_analysis = NewsAnalysis(
+        items=[
+            AnalyzedArticle(
+                article=fake_articles[0],
+                topic="trade",
+                severity="medium",
+                bullish_cop=False,
+                reasoning="deficit",
+                keywords=["déficit", "comercio"],
+            ),
+            AnalyzedArticle(
+                article=fake_articles[1],
+                topic="commodities",
+                severity="high",
+                bullish_cop=False,
+                reasoning="oil drop",
+                keywords=["petróleo", "recesión"],
+            ),
+        ],
+        narrative="Peso under pressure from weak commodities and trade deficit.",
     )
-    llm_narrative = "---\nPeso under pressure from weak commodities and trade deficit."
-
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content=llm_json + "\n" + llm_narrative)
 
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
-        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
+        MockAnalyzer.return_value.analyze.return_value = mock_analysis
         settings = MagicMock()
         settings.forecast_horizon_days = 5
         settings.report_output_dir = str(tmp_path)
@@ -84,15 +99,15 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
 
 @pytest.mark.integration()
 def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_path) -> None:  # type: ignore[no-untyped-def]
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(content='[]\n---\nNo news to analyze.')
-
     with (
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
-        patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm),
+        patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
+        MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
+            items=[], narrative="No news to analyze."
+        )
         settings = MagicMock()
         settings.forecast_horizon_days = 3
         settings.report_output_dir = str(tmp_path)

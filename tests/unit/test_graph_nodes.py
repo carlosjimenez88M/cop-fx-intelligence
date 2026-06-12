@@ -10,6 +10,7 @@ import pytest
 
 from cop_fx.agents.nodes import analyze_news, fetch_fx, fetch_news, generate_report
 from cop_fx.agents.state import PipelineState
+from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
 from cop_fx.data.news_fetcher import Article
 
 
@@ -86,7 +87,7 @@ def test_analyze_news_empty_articles_returns_defaults() -> None:
 
 
 @pytest.mark.unit()
-def test_analyze_news_calls_llm(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     articles = [
         Article(
             title="BanRep mantiene tasas",
@@ -97,15 +98,24 @@ def test_analyze_news_calls_llm(monkeypatch) -> None:  # type: ignore[no-untyped
         )
     ]
 
-    mock_llm = MagicMock()
-    mock_llm.invoke.return_value = MagicMock(
-        content='[{"index": 0, "topic": "monetary_policy", "severity": "medium", "bullish_cop": false}]\n---\nMarket is neutral.'
+    verdict = AnalyzedArticle(
+        article=articles[0],
+        topic="monetary_policy",
+        severity="medium",
+        bullish_cop=False,
+        reasoning="Rates on hold",
+        keywords=["BanRep", "tasas"],
     )
+    mock_analysis = NewsAnalysis(items=[verdict], narrative="Market is neutral.")
 
-    with patch("cop_fx.agents.nodes._get_llm", return_value=mock_llm):
+    with patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer:
+        MockAnalyzer.return_value.analyze.return_value = mock_analysis
         result = analyze_news(_base_state(raw_articles=articles))
 
-    assert len(result.get("analyzed_articles", [])) > 0
+    analyzed = result.get("analyzed_articles", [])
+    assert len(analyzed) == 1
+    assert analyzed[0]["topic"] == "monetary_policy"
+    assert analyzed[0]["keywords"] == ["BanRep", "tasas"]
     assert result.get("news_summary") == "Market is neutral."
 
 

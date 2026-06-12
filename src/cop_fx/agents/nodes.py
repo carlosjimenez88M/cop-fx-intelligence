@@ -6,22 +6,15 @@ from cop_fx.logger import get_logger
 from datetime import date, datetime, timezone
 from pathlib import Path
 
-from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import HumanMessage
-
 from cop_fx.agents.state import PipelineState
-from cop_fx.llm import get_chat_model
+from cop_fx.analysis.news_analyzer import NewsAnalyzer
+from cop_fx.config.settings import get_settings
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.timeseries.evaluator import evaluate
 from cop_fx.timeseries.models import ARIMAForecaster, ForecastResult, ProphetForecaster, ensemble_forecast
 
 logger = get_logger(__name__)
-
-
-def _get_llm() -> BaseChatModel:
-    # El adjudicador / reconciliación final = juicio de alto valor → tier 'judge'
-    return get_chat_model("judge")
 
 
 # ---------------------------------------------------------------------------
@@ -38,14 +31,13 @@ def fetch_fx(state: PipelineState) -> PipelineState:
         change_pct = (latest - rate_30d_ago) / rate_30d_ago * 100
 
         return {
-            **state,
             "fx_df": df,
             "latest_rate": latest,
             "rate_change_pct": round(change_pct, 2),
         }
     except Exception as exc:  # noqa: BLE001
         logger.error("fetch_fx failed: %s", exc)
-        return {**state, "errors": state.get("errors", []) + [f"fetch_fx: {exc}"]}
+        return {"errors": [f"fetch_fx: {exc}"]}
 
 
 # ---------------------------------------------------------------------------
@@ -57,10 +49,10 @@ def fetch_news(state: PipelineState) -> PipelineState:
     try:
         fetcher = NewsFetcher()
         articles = fetcher.fetch()
-        return {**state, "raw_articles": articles}
+        return {"raw_articles": articles}
     except Exception as exc:  # noqa: BLE001
         logger.error("fetch_news failed: %s", exc)
-        return {**state, "errors": state.get("errors", []) + [f"fetch_news: {exc}"]}
+        return {"errors": [f"fetch_news: {exc}"]}
 
 
 # ---------------------------------------------------------------------------
@@ -68,50 +60,26 @@ def fetch_news(state: PipelineState) -> PipelineState:
 # ---------------------------------------------------------------------------
 
 def analyze_news(state: PipelineState) -> PipelineState:
-    """Classify articles by topic and severity using Claude."""
+    """Classify articles via NewsAnalyzer (structured output, tier 'fast')."""
     articles = state.get("raw_articles", [])
     if not articles:
-        return {**state, "analyzed_articles": [], "news_summary": "No news available."}
+        return {"analyzed_articles": [], "news_summary": "No news available."}
 
-    llm = _get_llm()
+    analysis = NewsAnalyzer().analyze(articles[:20])
 
-    # Build a compact digest for the LLM
-    digest = "\n".join(
-        f"[{i+1}] {a.title} — {a.summary[:200]}" for i, a in enumerate(articles[:20])
-    )
-
-    prompt = f"""You are an economic analyst specialising in Colombian FX markets.
-
-Given the following news headlines and summaries, produce:
-1. A JSON array where each element has:
-   - index (1-based)
-   - topic: one of [monetary_policy, trade, political_risk, commodities, macro, other]
-   - severity: one of [high, medium, low]  (impact on COP/USD rate)
-   - bullish_cop: true if the news is likely to strengthen COP vs USD, false otherwise
-
-2. After the JSON, write a 3-sentence "Market Narrative" summarising the overall FX outlook.
-
-NEWS:
-{digest}
-
-Respond with valid JSON array first, then "---" separator, then the narrative.
-"""
-
-    try:
-        resp = llm.invoke([HumanMessage(content=prompt)])
-        raw = resp.content if isinstance(resp.content, str) else str(resp.content)
-
-        parts = raw.split("---", 1)
-        import json
-
-        analyzed = json.loads(parts[0].strip())
-        narrative = parts[1].strip() if len(parts) > 1 else ""
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("analyze_news LLM call failed: %s", exc)
-        analyzed = []
-        narrative = "News analysis unavailable."
-
-    return {**state, "analyzed_articles": analyzed, "news_summary": narrative}
+    analyzed = [
+        {
+            "title": item.article.title,
+            "url": item.article.url,
+            "topic": item.topic,
+            "keywords": item.keywords,
+            "severity": item.severity,
+            "bullish_cop": item.bullish_cop,
+            "reasoning": item.reasoning,
+        }
+        for item in analysis.items
+    ]
+    return {"analyzed_articles": analyzed, "news_summary": analysis.narrative}
 
 
 # ---------------------------------------------------------------------------
@@ -122,7 +90,7 @@ def run_forecast(state: PipelineState) -> PipelineState:
     """Fit Prophet + ARIMA and build ensemble forecast."""
     df = state.get("fx_df")
     if df is None or df.empty:
-        return {**state, "errors": state.get("errors", []) + ["run_forecast: no FX data"]}
+        return {"errors": ["run_forecast: no FX data"]}
 
     horizon = state.get("horizon_days", get_settings().forecast_horizon_days)
 
@@ -142,7 +110,7 @@ def run_forecast(state: PipelineState) -> PipelineState:
 
     valid = [r for r in [prophet_result, arima_result] if r is not None]
     if not valid:
-        return {**state, "errors": state.get("errors", []) + ["run_forecast: both models failed"]}
+        return {"errors": ["run_forecast: both models failed"]}
 
     ensemble = ensemble_forecast(valid)
 
@@ -158,7 +126,6 @@ def run_forecast(state: PipelineState) -> PipelineState:
             pass
 
     updates: PipelineState = {
-        **state,
         "ensemble_df": ensemble,
         "eval_metrics": eval_metrics,
     }
@@ -232,7 +199,7 @@ def generate_report(state: PipelineState) -> PipelineState:
         f"#COP #Dólar #Colombia"
     )[:280]
 
-    return {**state, "report_markdown": report, "report_path": report_path, "tweet_text": tweet}
+    return {"report_markdown": report, "report_path": report_path, "tweet_text": tweet}
 
 
 # ---------------------------------------------------------------------------
@@ -243,15 +210,15 @@ def publish(state: PipelineState) -> PipelineState:
     """Post the daily tweet (only when twitter_enabled=True)."""
     if not state.get("publish_enabled", False):
         logger.info("publish: skipped (publish_enabled=False)")
-        return state
+        return {}
 
     settings = get_settings()
     if not settings.twitter_enabled:
-        return state
+        return {}
 
     tweet_text = state.get("tweet_text", "")
     if not tweet_text:
-        return state
+        return {}
 
     try:
         import tweepy
@@ -266,7 +233,7 @@ def publish(state: PipelineState) -> PipelineState:
         resp = client.create_tweet(text=tweet_text)
         tweet_id = str(resp.data["id"])  # type: ignore[index]
         logger.info("Tweet published: %s", tweet_id)
-        return {**state, "tweet_id": tweet_id}
+        return {"tweet_id": tweet_id}
     except Exception as exc:  # noqa: BLE001
         logger.error("publish tweet failed: %s", exc)
-        return {**state, "errors": state.get("errors", []) + [f"publish: {exc}"]}
+        return {"errors": [f"publish: {exc}"]}

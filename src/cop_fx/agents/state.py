@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, TypedDict
+import operator
+from typing import Annotated, Any, TypedDict
 
 import pandas as pd
 
@@ -39,5 +40,7 @@ class PipelineState(TypedDict, total=False):
     tweet_id: str | None            # set after publishing
 
     # ── Control ───────────────────────────────────────────────────────
-    errors: list[str]
+    # Reducer: ramas paralelas (fetch_fx / fetch_news) pueden aportar
+    # errores en el mismo paso — operator.add los concatena en vez de chocar.
+    errors: Annotated[list[str], operator.add]
     publish_enabled: bool
