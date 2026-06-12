@@ -47,12 +47,16 @@ class Settings(BaseSettings):
     newsapi_key: SecretStr | None = Field(None, description="NewsAPI.org key")
     news_rss_feeds: list[str] = Field(
         default=[
+            # ── Lado COP: economía colombiana ─────────────────────────
             "https://feeds.eltiempo.com/rss/economia",
             "https://www.portafolio.co/rss/economia.xml",
             "https://feeds.semana.com/negocios",
             "https://rss.app/feeds/economia-colombia.xml",
+            # ── Lado USD: macro global / Fed (el USD/COP es mitad dólar) ──
+            "https://www.cnbc.com/id/20910258/device/rss/rss.html",      # CNBC Economy
+            "https://feeds.content.dowjones.io/public/rss/mw_topstories",  # MarketWatch
         ],
-        description="RSS feeds to scrape for Colombian economic news",
+        description="RSS feeds: economía colombiana (lado COP) + macro global (lado USD)",
     )
     news_max_articles: int = Field(50, ge=1, le=200)
 
