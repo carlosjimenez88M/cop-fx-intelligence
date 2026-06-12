@@ -9,9 +9,9 @@ from cop_fx.ingestion.news.schemas import Article
 from cop_fx.ingestion.news.sources import SOURCES, NewsSource
 
 __all__ = [
+    "SOURCES",
     "Article",
     "NewsSource",
-    "SOURCES",
     "fetch_all",
     "run_news_ingestion",
     "validate_sources",

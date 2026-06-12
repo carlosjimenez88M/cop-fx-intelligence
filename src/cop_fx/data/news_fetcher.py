@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import feedparser
 import httpx
 
 from cop_fx.config.settings import get_settings
-from cop_fx.data.cnn_fetcher import CNNColombiaFetcher, CNNArticle
+from cop_fx.data.cnn_fetcher import CNNArticle, CNNColombiaFetcher
+from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -70,7 +70,7 @@ class NewsFetcher:
                 )
                 for a in cnn_articles
             ]
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("CNNColombiaFetcher failed: %s", exc)
             return []
 
@@ -94,17 +94,16 @@ class NewsFetcher:
                             source=feed.feed.get("title", feed_url),
                         )
                     )
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.warning("RSS feed %s failed: %s", feed_url, exc)
         return articles
 
     @staticmethod
     def _parse_rss_date(entry: feedparser.FeedParserDict) -> datetime:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
-            import time
 
-            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        return datetime.now(tz=timezone.utc)
+            return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+        return datetime.now(tz=UTC)
 
     # ------------------------------------------------------------------
     # NewsAPI
@@ -123,7 +122,7 @@ class NewsFetcher:
                 resp = client.get("https://newsapi.org/v2/everything", params=params)
                 resp.raise_for_status()
             data = resp.json()
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.warning("NewsAPI failed: %s", exc)
             return []
 
@@ -134,7 +133,7 @@ class NewsFetcher:
                     item["publishedAt"].replace("Z", "+00:00")
                 )
             except (KeyError, ValueError):
-                published = datetime.now(tz=timezone.utc)
+                published = datetime.now(tz=UTC)
             articles.append(
                 Article(
                     title=item.get("title") or "",

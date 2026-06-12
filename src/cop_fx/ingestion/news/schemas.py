@@ -8,7 +8,7 @@ cambia de forma explícita en un solo lugar.
 from __future__ import annotations
 
 import hashlib
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
@@ -27,7 +27,7 @@ class Article(BaseModel):
     country: Country = Field(description="CO = local, GLOBAL = lado USD/macro")
     published_at: datetime
     fetched_at: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc)
+        default_factory=lambda: datetime.now(UTC)
     )
 
     @field_validator("published_at", "fetched_at")
@@ -35,8 +35,8 @@ class Article(BaseModel):
     def _ensure_tz(cls, v: datetime) -> datetime:
         """Toda fecha vive en UTC con tzinfo — evita comparaciones naive/aware."""
         if v.tzinfo is None:
-            return v.replace(tzinfo=timezone.utc)
-        return v.astimezone(timezone.utc)
+            return v.replace(tzinfo=UTC)
+        return v.astimezone(UTC)
 
     @staticmethod
     def make_id(url: str) -> str:
@@ -52,7 +52,7 @@ class Article(BaseModel):
         source: str,
         country: Country,
         published_at: datetime,
-    ) -> "Article":
+    ) -> Article:
         """Construye un Article calculando el id a partir de la URL."""
         return cls(
             id=cls.make_id(url),

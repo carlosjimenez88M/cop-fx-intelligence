@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import feedparser
 import httpx
@@ -83,8 +83,8 @@ class CNNRSSParser:
     @staticmethod
     def _parse_date(entry: feedparser.FeedParserDict) -> datetime:
         if hasattr(entry, "published_parsed") and entry.published_parsed:
-            return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
-        return datetime.now(tz=timezone.utc)
+            return datetime(*entry.published_parsed[:6], tzinfo=UTC)
+        return datetime.now(tz=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -150,7 +150,7 @@ class CNNHTMLParser:
             logger.error("HTTP %d fetching %s", exc.response.status_code, url)
         except httpx.TimeoutException:
             logger.error("Timeout fetching %s", url)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             logger.error("Unexpected error fetching HTML: %s", exc)
         return ""
 
@@ -197,11 +197,11 @@ class CNNHTMLParser:
                     int(match.group(1)),
                     int(match.group(2)),
                     int(match.group(3)),
-                    tzinfo=timezone.utc,
+                    tzinfo=UTC,
                 )
             except ValueError:
                 pass
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(tz=UTC)
 
 
 # ---------------------------------------------------------------------------

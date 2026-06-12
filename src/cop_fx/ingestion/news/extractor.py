@@ -20,7 +20,7 @@ Decisiones de diseño:
 from __future__ import annotations
 
 import json
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import feedparser
@@ -47,17 +47,17 @@ def _download(url: str) -> bytes | None:
             resp = client.get(url, headers={"User-Agent": _USER_AGENT})
             resp.raise_for_status()
             return resp.content
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("feed no disponible %s: %s", url, exc)
         return None
 
 
 def _parse_published(entry: feedparser.FeedParserDict) -> datetime:
     if getattr(entry, "published_parsed", None):
-        return datetime(*entry.published_parsed[:6], tzinfo=timezone.utc)
+        return datetime(*entry.published_parsed[:6], tzinfo=UTC)
     if getattr(entry, "updated_parsed", None):
-        return datetime(*entry.updated_parsed[:6], tzinfo=timezone.utc)
-    return datetime.now(tz=timezone.utc)
+        return datetime(*entry.updated_parsed[:6], tzinfo=UTC)
+    return datetime.now(tz=UTC)
 
 
 def _parse_feed(raw: bytes, source: NewsSource) -> list[Article]:
