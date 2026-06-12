@@ -45,6 +45,7 @@ class PipelineState(TypedDict, total=False):
 
     # ── Adjudicación (Etapa 4) ────────────────────────────────────────
     ts_signal: dict[str, Any]                # TimeSeriesSignal serializado
+    market_signal: dict[str, Any]            # MarketSignal serializado (contexto)
     directional_call: dict[str, Any]         # DirectionalCall serializado
 
     # ── Forecast ──────────────────────────────────────────────────────

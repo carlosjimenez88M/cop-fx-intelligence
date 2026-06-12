@@ -18,23 +18,25 @@ from cop_fx.contracts import (
     AdjudicatorVerdict,
     ArticleAnalysis,
     DirectionalCall,
+    MarketSignal,
     MaterialityGate,
     NewsSignal,
     TimeSeriesSignal,
     aggregate_news_signal,
 )
 from cop_fx.data.fx_fetcher import FXFetcher
+from cop_fx.data.market_fetcher import MARKET_SYMBOLS, fetch_yahoo_series
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
 from cop_fx.logger import get_logger
 from cop_fx.timeseries.evaluator import evaluate
-from cop_fx.tracking.predictions import PredictionStore
 from cop_fx.timeseries.models import (
     ARIMAForecaster,
     ForecastResult,
     ProphetForecaster,
     ensemble_forecast,
 )
+from cop_fx.tracking.predictions import PredictionStore
 
 logger = get_logger(__name__)
 
@@ -43,6 +45,9 @@ MAX_TOPIC_WORKERS = 6
 
 # Banda muerta del forecast: |Δ%| menor a esto = la serie no opina (neutral).
 TS_NEUTRAL_BAND_PCT = 0.10
+
+# Banda muerta del equity: un movimiento bursátil menor a esto no opina.
+MARKET_DEAD_BAND_PCT = 0.30
 
 
 # ---------------------------------------------------------------------------
@@ -81,6 +86,50 @@ def fetch_news(state: PipelineState) -> PipelineState:
     except Exception as exc:
         logger.error("fetch_news failed: %s", exc)
         return {"errors": [f"fetch_news: {exc}"]}
+
+
+# ---------------------------------------------------------------------------
+# Node: fetch_market  (integración del estudio macro — notebooks/02)
+# ---------------------------------------------------------------------------
+
+def fetch_market(state: PipelineState) -> PipelineState:
+    """Contexto de mercado determinista para el adjudicador.
+
+    Aplica el hallazgo validado del estudio macro: el agregado bursátil
+    colombiano (GXG) de AYER es el único predictor adelantado robusto del
+    USD/COP (equity[t-1]→cop[t] ≈ -0.4). Bolsa arriba ⇒ COP se fortalece
+    ⇒ dirección `down`. DXY y Brent viajan como contexto, sin voto.
+
+    Es contexto OPCIONAL: si Yahoo falla, el pipeline sigue sin él.
+    """
+    try:
+        rets: dict[str, float] = {}
+        for name in ("equity", "dxy", "brent"):
+            series = fetch_yahoo_series(MARKET_SYMBOLS[name], lookback_days=30)
+            rets[name] = float(series["y"].iloc[-1] / series["y"].iloc[-2] - 1) * 100
+
+        equity = rets["equity"]
+        if equity > MARKET_DEAD_BAND_PCT:
+            direction = "down"   # bolsa arriba ⇒ apetito por Colombia ⇒ USD/COP baja
+        elif equity < -MARKET_DEAD_BAND_PCT:
+            direction = "up"
+        else:
+            direction = "neutral"
+
+        signal = MarketSignal(
+            direction=direction,  # type: ignore[arg-type]
+            equity_ret_1d_pct=round(equity, 3),
+            dxy_ret_1d_pct=round(rets["dxy"], 3),
+            brent_ret_1d_pct=round(rets["brent"], 3),
+        )
+        logger.info(
+            "Market context: %s (equity %+.2f%%, dxy %+.2f%%, brent %+.2f%%)",
+            signal.direction, equity, rets["dxy"], rets["brent"],
+        )
+        return {"market_signal": signal.model_dump()}
+    except Exception as exc:
+        logger.warning("fetch_market failed (%s) — el contexto es opcional", exc)
+        return {"market_signal": {}}
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +482,13 @@ Cluster narratives:
 TIME-SERIES SIGNAL (Prophet+ARIMA ensemble, deterministic sign):
 {ts_signal}
 
+MARKET CONTEXT (deterministic, yesterday's moves). The Colombian equity
+aggregate is the ONLY empirically validated leading indicator of USD/COP
+(equity up yesterday => COP tends to strengthen => USD/COP DOWN); DXY and
+Brent are background, not votes. Use this as evidence to break ties or
+temper confidence — do not treat it as a third signal to echo:
+{market_signal}
+
 Current rate: 1 USD = {latest:,.2f} COP ({change:+.2f}% vs 30 days ago).
 
 Rules of reasoning — in this order:
@@ -507,11 +563,13 @@ def adjudicate(state: PipelineState) -> PipelineState:
         else TimeSeriesSignal(direction="neutral", yhat_delta_pct=0.0, models_agree=False)
     )
 
+    market = state.get("market_signal") or {}
     prompt = _ADJUDICATOR_PROMPT.format(
         horizon=horizon,
         news_signal=news.model_dump_json(),
         narratives=state.get("news_summary", "(no narratives)"),
         ts_signal=ts.model_dump_json(),
+        market_signal=market or "(not available today)",
         latest=state.get("latest_rate", 0.0),
         change=state.get("rate_change_pct", 0.0),
     )
@@ -565,7 +623,7 @@ def record_prediction(state: PipelineState) -> PipelineState:
         store.save(
             call,
             run_date=state.get("run_date", date.today().isoformat()),
-            latest_rate=float(latest) if latest else None,  # type: ignore[arg-type]
+            latest_rate=float(latest) if latest else None,
         )
         fx_df = state.get("fx_df")
         if fx_df is not None and not fx_df.empty:
@@ -618,6 +676,15 @@ def generate_report(state: PipelineState) -> PipelineState:
         call_emoji = {"down": "⬇️", "up": "⬆️", "neutral": "⏸️"}[call["direction"]]
         drivers = "".join(f"\n- {d}" for d in call["news_signal"]["drivers"])
         caveats = "".join(f"\n- {c}" for c in call["caveats"])
+        market = state.get("market_signal") or {}
+        market_line = ""
+        if market:
+            market_line = (
+                f"Mercado (ayer): bolsa CO {market['equity_ret_1d_pct']:+.2f}% · "
+                f"DXY {market['dxy_ret_1d_pct']:+.2f}% · "
+                f"Brent {market['brent_ret_1d_pct']:+.2f}% "
+                f"→ sesgo {market['direction']}\n\n"
+            )
         verdict_section = f"""## Directional Call — {call["horizon_days"]} días
 **{labels[call["direction"]]}** · confianza **{call["confidence"]:.2f}** · reconciliación **{call["reconciliation"]}**
 
@@ -625,7 +692,7 @@ Señales: noticias = {call["news_signal"]["direction"]} (score {call["news_signa
 serie = {call["ts_signal"]["direction"]} ({call["ts_signal"]["yhat_delta_pct"]:+.2f}%, \
 modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
 
-**Racional:** {call["rationale"]}
+{market_line}**Racional:** {call["rationale"]}
 
 **Abogado del diablo:** {call["devils_advocate"]}
 

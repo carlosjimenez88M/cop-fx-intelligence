@@ -157,6 +157,22 @@ class TimeSeriesSignal(BaseModel):
     models_agree: bool = Field(description="¿Prophet y ARIMA dan el mismo signo?")
 
 
+class MarketSignal(BaseModel):
+    """Contexto de mercado determinista — validado por el estudio macro.
+
+    El agregado bursátil colombiano (GXG) fue el ÚNICO activo con poder
+    adelantado robusto (equity[t-1]→cop[t] ≈ -0.4, ver notebooks/02):
+    bolsa arriba ayer ⇒ COP se fortalece ⇒ USD/COP tiende a bajar.
+    DXY y Brent van como contexto, no como voto. Café, oro, VIX, tasas US
+    y pares LatAm fueron probados y descartados con datos.
+    """
+
+    direction: Direction = Field(description="Regla sobre el retorno de ayer del equity")
+    equity_ret_1d_pct: float
+    dxy_ret_1d_pct: float
+    brent_ret_1d_pct: float
+
+
 class AdjudicatorVerdict(BaseModel):
     """Lo que el LLM adjudicador produce — y NADA más.
 

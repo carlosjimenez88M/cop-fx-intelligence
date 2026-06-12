@@ -18,6 +18,7 @@ from cop_fx.agents.nodes import (
     compute_ts_signal,
     fan_out_clusters,
     fetch_fx,
+    fetch_market,
     fetch_news,
     generate_report,
     orchestrate,
@@ -320,6 +321,60 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
     assert analyzed[0]["topic"] == "monetary_policy"
     assert analyzed[0]["keywords"] == ["BanRep", "tasas"]
     assert result.get("news_summary") == "Market is neutral."
+
+
+# ── fetch_market (integración del estudio macro) ─────────────────────────
+
+def _market_series(last_two: tuple[float, float]) -> pd.DataFrame:
+    return pd.DataFrame(
+        {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": list(last_two)}
+    )
+
+
+@pytest.mark.unit()
+def test_fetch_market_equity_rule() -> None:
+    # bolsa +1% ayer ⇒ COP se fortalece ⇒ USD/COP down
+    series = {
+        "GXG": _market_series((30.0, 30.3)),       # +1.0%
+        "DX-Y.NYB": _market_series((100.0, 100.1)),
+        "BZ=F": _market_series((70.0, 69.0)),
+    }
+    with patch(
+        "cop_fx.agents.nodes.fetch_yahoo_series",
+        side_effect=lambda symbol, lookback_days=30: series[symbol],
+    ):
+        result = fetch_market(_base_state())
+
+    signal = result["market_signal"]
+    assert signal["direction"] == "down"
+    assert signal["equity_ret_1d_pct"] == 1.0
+
+
+@pytest.mark.unit()
+def test_fetch_market_dead_band_is_neutral() -> None:
+    series = {
+        "GXG": _market_series((30.0, 30.03)),      # +0.1% < banda 0.3%
+        "DX-Y.NYB": _market_series((100.0, 100.0)),
+        "BZ=F": _market_series((70.0, 70.0)),
+    }
+    with patch(
+        "cop_fx.agents.nodes.fetch_yahoo_series",
+        side_effect=lambda symbol, lookback_days=30: series[symbol],
+    ):
+        result = fetch_market(_base_state())
+
+    assert result["market_signal"]["direction"] == "neutral"
+
+
+@pytest.mark.unit()
+def test_fetch_market_fails_soft() -> None:
+    with patch(
+        "cop_fx.agents.nodes.fetch_yahoo_series",
+        side_effect=ConnectionError("yahoo down"),
+    ):
+        result = fetch_market(_base_state())
+
+    assert result["market_signal"] == {}  # contexto opcional: no rompe el pipeline
 
 
 # ── Etapa 4: compute_ts_signal / adjudicate ──────────────────────────────

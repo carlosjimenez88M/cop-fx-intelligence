@@ -12,6 +12,7 @@ from cop_fx.agents.nodes import (
     check_materiality,
     fan_out_clusters,
     fetch_fx,
+    fetch_market,
     fetch_news,
     generate_report,
     orchestrate,
@@ -64,6 +65,7 @@ def build_graph() -> StateGraph:
 
     # Register nodes
     graph.add_node("fetch_fx", fetch_fx)
+    graph.add_node("fetch_market", fetch_market)
     graph.add_node("fetch_news", fetch_news)
     graph.add_node("check_materiality", check_materiality)
     graph.add_node("skip_news", skip_news)
@@ -76,8 +78,10 @@ def build_graph() -> StateGraph:
     graph.add_node("record_prediction", record_prediction)
     graph.add_node("publish", publish)
 
-    # Parallel fetch branches
+    # Parallel fetch branches (fetch_market no tiene arista de salida a
+    # propósito: escribe market_signal y el defer del adjudicador lo espera)
     graph.add_edge(START, "fetch_fx")
+    graph.add_edge(START, "fetch_market")
     graph.add_edge(START, "fetch_news")
     graph.add_edge("fetch_fx", "run_forecast")
 

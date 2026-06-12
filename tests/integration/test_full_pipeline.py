@@ -125,6 +125,12 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
         ),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
         patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
+        patch(
+            "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
+            side_effect=lambda symbol, lookback_days=30: pd.DataFrame(
+                {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": [100.0, 101.0]}
+            ),
+        ),
     ):
         MockAnalyzer.return_value.analyze.return_value = mock_analysis
         settings = MagicMock()
@@ -172,6 +178,12 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         patch("cop_fx.agents.nodes.get_chat_model", return_value=_llm_by_schema()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
         patch("cop_fx.agents.nodes.PredictionStore"),  # no escribir la DB real
+        patch(
+            "cop_fx.agents.nodes.fetch_yahoo_series",  # sin red en tests
+            side_effect=lambda symbol, lookback_days=30: pd.DataFrame(
+                {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": [100.0, 101.0]}
+            ),
+        ),
     ):
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
             items=[], narrative="No news to analyze."
