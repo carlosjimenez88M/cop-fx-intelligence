@@ -16,6 +16,32 @@ from cop_fx.logger import get_logger
 logger = get_logger(__name__)
 
 
+def order_articles(articles: list[Article]) -> list[Article]:
+    """Mismo día = mismo pie.
+
+    Ordena por FECHA (no hora) descendente y, dentro de cada día, intercala
+    las fuentes (round-robin). Sin esto, las fuentes con timestamp fino
+    (RSS con hora exacta) monopolizan el tope y las que traen solo fecha
+    (CNN a medianoche) quedan siempre al fondo — aunque sean del mismo día
+    y pesen igual sobre la tendencia del dólar.
+    """
+    from itertools import groupby
+
+    by_date = sorted(articles, key=lambda a: a.published_at.date(), reverse=True)
+    ordered: list[Article] = []
+    for _, day_group in groupby(by_date, key=lambda a: a.published_at.date()):
+        queues: dict[str, list[Article]] = {}
+        for article in day_group:
+            queues.setdefault(article.source, []).append(article)
+        rotation = list(queues.values())
+        while rotation:
+            for queue in rotation[:]:
+                ordered.append(queue.pop(0))
+                if not queue:
+                    rotation.remove(queue)
+    return ordered
+
+
 @dataclass
 class Article:
     title: str
@@ -51,8 +77,7 @@ class NewsFetcher:
                 seen.add(a.url)
                 unique.append(a)
 
-        unique.sort(key=lambda a: a.published_at, reverse=True)
-        result = unique[: self._settings.news_max_articles]
+        result = order_articles(unique)[: self._settings.news_max_articles]
         logger.success("Fetched %d unique articles total", len(result))  # type: ignore[attr-defined]
         return result
 

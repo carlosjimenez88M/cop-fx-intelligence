@@ -549,3 +549,38 @@ def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path) 
     assert "+1.25%" in result["report_markdown"]
     assert result.get("tweet_text", "").startswith("COP/USD")
     assert len(result.get("tweet_text", "")) <= 280
+
+
+# ── order_articles: mismo día = mismo pie ────────────────────────────────
+
+@pytest.mark.unit()
+def test_order_articles_same_day_interleaves_sources() -> None:
+    from datetime import datetime, timedelta
+
+    from cop_fx.data.news_fetcher import order_articles
+
+    def art(source: str, title: str, dt: datetime) -> Article:
+        return Article(title=title, summary="x" * 100, url=f"https://x.com/{title}",
+                       published_at=dt, source=source)
+
+    today = datetime(2026, 6, 12, tzinfo=UTC)
+    arts = [
+        # RSS con hora fina (tarde) — antes monopolizaba el tope
+        art("Portafolio", "p1", today.replace(hour=15)),
+        art("Portafolio", "p2", today.replace(hour=14)),
+        art("Portafolio", "p3", today.replace(hour=13)),
+        # CNN con fecha sin hora (medianoche) — antes quedaba al fondo
+        art("CNN", "c1", today),
+        art("CNN", "c2", today),
+        # ayer
+        art("Portafolio", "y1", today - timedelta(days=1)),
+    ]
+    ordered = order_articles(arts)
+    top4_sources = [a.source for a in ordered[:4]]
+
+    # Mismo día: las fuentes se intercalan — CNN aparece en el top aunque
+    # su timestamp sea medianoche
+    assert "CNN" in top4_sources[:2]
+    assert "Portafolio" in top4_sources[:2]
+    # La fecha sigue mandando: lo de ayer va al final
+    assert ordered[-1].title == "y1"

@@ -16,13 +16,11 @@ news_max_articles: 100           # artículos a traer por corrida
 gate_headlines_cap: 60           # titulares que evalúa el gate de materialidad
 min_analyzable_chars: 80         # sin cuerpo ni summary de este tamaño → se descarta
 news_rss_feeds:
-  # Lado COP: economía colombiana
-  - https://feeds.eltiempo.com/rss/economia
-  - https://www.portafolio.co/rss/economia.xml
-  - https://feeds.semana.com/negocios
-  - https://rss.app/feeds/economia-colombia.xml
+  # Lado COP: economía colombiana (verificados 2026-06-12: vivos y con texto)
+  - https://www.larepublica.co/rss/economia      # cuerpo completo extraíble (~2.800 chars)
+  - https://www.portafolio.co/rss/economia.xml   # paywall: solo resumen de 1 línea
   # Lado USD: macro global / Fed
-  - https://www.cnbc.com/id/20910258/device/rss/rss.html
+  - https://www.cnbc.com/id/20910258/device/rss/rss.html  # cuerpo extraíble (~1.800 chars)
 
 # ── Agentes ──────────────────────────────────────────────────
 max_topic_workers: 6             # cota del fan-out (Send) — controla costo

@@ -150,6 +150,9 @@ Think in transmission channels, including second-order ones:
   - public health crises transmit via growth and fiscal cost;
   - climate events (drought, El Niño, floods) via food inflation and energy;
   - strikes and social unrest via country risk;
+  - foreign macro OUTSIDE the US (Europe, UK, Asia) matters only if it moves
+    global risk appetite, oil or the dollar index — on its own it is usually
+    NOT material for USD/COP;
   - sports, entertainment and human-interest stories are NOT material.
 
 Then set `has_material_news` = true if at least one headline is material,

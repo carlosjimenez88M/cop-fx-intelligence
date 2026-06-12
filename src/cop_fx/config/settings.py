@@ -83,10 +83,8 @@ class Settings(BaseSettings):
     newsapi_key: SecretStr | None = Field(None, description="NewsAPI.org key (.env, opcional)")
     news_rss_feeds: list[str] = Field(
         default=[
-            "https://feeds.eltiempo.com/rss/economia",
+            "https://www.larepublica.co/rss/economia",
             "https://www.portafolio.co/rss/economia.xml",
-            "https://feeds.semana.com/negocios",
-            "https://rss.app/feeds/economia-colombia.xml",
             "https://www.cnbc.com/id/20910258/device/rss/rss.html",
         ],
         description="RSS feeds: economía colombiana (lado COP) + macro global (lado USD)",

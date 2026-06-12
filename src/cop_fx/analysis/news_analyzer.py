@@ -55,7 +55,10 @@ what the news IS (`topic`) and HOW it transmits to the USD/COP rate
   - entities: up to 5 named entities (people, institutions, companies, places)
   - fx_relevance: direct | indirect | none. Think second-order channels:
     a drought is indirect via food inflation; an epidemic via growth and
-    fiscal risk; a football match is none.
+    fiscal risk; a football match is none. Foreign macro OUTSIDE the US
+    (UK GDP, ECB, Asia) is at most INDIRECT via the dollar index or global
+    risk appetite — low/medium severity, or none if purely domestic to
+    that country.
   - fx_channel: the transmission mechanism (interest_rates, inflation,
     terms_of_trade, country_risk, capital_flows, growth, none)
   - severity: expected magnitude of the FX impact (high | medium | low)
