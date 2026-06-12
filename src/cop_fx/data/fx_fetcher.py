@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
 from datetime import date, timedelta
 
 import httpx
 import pandas as pd
 
 from cop_fx.config.settings import get_settings
+from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -16,7 +16,13 @@ _AV_BASE = "https://www.alphavantage.co/query"
 
 
 class FXFetcher:
-    """Fetches daily COP/USD rates from Alpha Vantage (primary) or Banco de la República (fallback)."""
+    """Fetches daily COP/USD rates.
+
+    Cadena de fuentes: Alpha Vantage (si hay key) → TRM oficial vía
+    datos.gov.co (Socrata, sin key) → Yahoo Finance. El viejo scraper de
+    banrep.gov.co quedó bloqueado por bot-manager; datos.gov.co publica la
+    MISMA TRM de la Superfinanciera por API abierta.
+    """
 
     def __init__(self) -> None:
         self._settings = get_settings()
@@ -35,16 +41,25 @@ class FXFetcher:
         end = date.today()
         start = end - timedelta(days=days)
 
+        sources: list[tuple[str, object]] = []
         av_key = self._settings.alpha_vantage_api_key
         if av_key:
+            sources.append(
+                ("Alpha Vantage", lambda: self._fetch_alpha_vantage(av_key.get_secret_value()))
+            )
+        sources.append(("TRM datos.gov.co", lambda: self._fetch_trm_datos_gov(start, end)))
+        sources.append(("Yahoo Finance", lambda: self._fetch_yahoo(days)))
+
+        df: pd.DataFrame | None = None
+        for name, fetch_fn in sources:
             try:
-                df = self._fetch_alpha_vantage(av_key.get_secret_value())
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("Alpha Vantage failed (%s), falling back to BanRep", exc)
-                df = self._fetch_banrep(start, end)
-        else:
-            logger.info("No Alpha Vantage key — using BanRep endpoint")
-            df = self._fetch_banrep(start, end)
+                df = fetch_fn()  # type: ignore[operator]
+                logger.info("FX source: %s", name)
+                break
+            except Exception as exc:
+                logger.warning("FX source %s failed (%s) — trying next", name, exc)
+        if df is None or df.empty:
+            raise RuntimeError("All FX sources failed (Alpha Vantage / datos.gov.co / Yahoo)")
 
         df = df[(df["ds"] >= pd.Timestamp(start)) & (df["ds"] <= pd.Timestamp(end))]
         df = df.sort_values("ds").reset_index(drop=True)
@@ -77,25 +92,51 @@ class FXFetcher:
         ]
         return pd.DataFrame(rows)
 
-    def _fetch_banrep(self, start: date, end: date) -> pd.DataFrame:
-        """Fetch from Banco de la República's public TRM endpoint."""
-        url = (
-            f"https://www.banrep.gov.co/es/estadisticas/trm"
-            f"?inicio={start.strftime('%d/%m/%Y')}"
-            f"&fin={end.strftime('%d/%m/%Y')}"
-        )
-        with httpx.Client(timeout=30, follow_redirects=True) as client:
-            resp = client.get(url)
+    def _fetch_trm_datos_gov(self, start: date, end: date) -> pd.DataFrame:
+        """TRM oficial (Superfinanciera) vía la API Socrata de datos.gov.co.
+
+        Dataset 32sa-8pi3 — sin API key, JSON limpio. Es la misma TRM que
+        publica el BanRep, pero por un endpoint pensado para máquinas.
+        """
+        url = "https://www.datos.gov.co/resource/32sa-8pi3.json"
+        params = {
+            "$select": "vigenciadesde,valor",
+            "$where": (
+                f"vigenciadesde >= '{start.isoformat()}T00:00:00.000'"
+                f" AND vigenciadesde <= '{end.isoformat()}T23:59:59.000'"
+            ),
+            "$order": "vigenciadesde ASC",
+            "$limit": "5000",
+        }
+        with httpx.Client(timeout=30) as client:
+            resp = client.get(url, params=params)
             resp.raise_for_status()
+        rows = resp.json()
+        if not rows:
+            raise ValueError("datos.gov.co returned no TRM rows")
 
-        tables = pd.read_html(resp.text)
-        if not tables:
-            raise ValueError("BanRep returned no parseable tables")
-
-        df = tables[0].copy()
-        df.columns = ["date_str", "y"]
-        df["ds"] = pd.to_datetime(df["date_str"], dayfirst=True, errors="coerce")
-        df["y"] = pd.to_numeric(
-            df["y"].astype(str).str.replace(",", ".", regex=False), errors="coerce"
-        )
+        df = pd.DataFrame(rows)
+        df["ds"] = pd.to_datetime(df["vigenciadesde"], errors="coerce")
+        df["y"] = pd.to_numeric(df["valor"], errors="coerce")
         return df[["ds", "y"]].dropna()
+
+    def _fetch_yahoo(self, lookback_days: int) -> pd.DataFrame:
+        """USD/COP histórico desde la chart API pública de Yahoo Finance."""
+        quote = self._settings.fx_quote_currency
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{quote}=X"
+        params = {"range": f"{max(lookback_days, 30)}d", "interval": "1d"}
+        headers = {"User-Agent": "Mozilla/5.0 (cop-fx-intelligence)"}
+        with httpx.Client(timeout=30, headers=headers) as client:
+            resp = client.get(url, params=params)
+            resp.raise_for_status()
+        result = resp.json()["chart"]["result"][0]
+        timestamps = result["timestamp"]
+        closes = result["indicators"]["quote"][0]["close"]
+
+        df = pd.DataFrame(
+            {
+                "ds": pd.to_datetime(timestamps, unit="s").normalize(),
+                "y": pd.to_numeric(pd.Series(closes), errors="coerce"),
+            }
+        )
+        return df.dropna()
