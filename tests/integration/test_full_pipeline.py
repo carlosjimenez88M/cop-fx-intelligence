@@ -10,7 +10,19 @@ import pytest
 
 from cop_fx.agents.graph import run_pipeline
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
+from cop_fx.contracts import MaterialityGate
 from cop_fx.data.news_fetcher import Article
+
+
+def _material_gate_llm(material: bool = True) -> MagicMock:
+    """Mock de get_chat_model para el nodo check_materiality."""
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = MaterialityGate(
+        has_material_news=material, reason="mocked gate"
+    )
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+    return base_llm
 
 
 @pytest.fixture()
@@ -68,6 +80,7 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
         patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch("cop_fx.agents.nodes.get_chat_model", return_value=_material_gate_llm()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
         MockAnalyzer.return_value.analyze.return_value = mock_analysis
@@ -103,6 +116,7 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         patch("cop_fx.agents.nodes.FXFetcher") as MockFX,
         patch("cop_fx.agents.nodes.NewsFetcher") as MockNews,
         patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer,
+        patch("cop_fx.agents.nodes.get_chat_model", return_value=_material_gate_llm()),
         patch("cop_fx.agents.nodes.get_settings") as MockSettings,
     ):
         MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(

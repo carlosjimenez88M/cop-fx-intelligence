@@ -2,17 +2,24 @@
 
 from __future__ import annotations
 
-from cop_fx.logger import get_logger
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 from cop_fx.agents.state import PipelineState
 from cop_fx.analysis.news_analyzer import NewsAnalyzer
 from cop_fx.config.settings import get_settings
+from cop_fx.contracts import MaterialityGate
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.news_fetcher import NewsFetcher
+from cop_fx.llm import get_chat_model
+from cop_fx.logger import get_logger
 from cop_fx.timeseries.evaluator import evaluate
-from cop_fx.timeseries.models import ARIMAForecaster, ForecastResult, ProphetForecaster, ensemble_forecast
+from cop_fx.timeseries.models import (
+    ARIMAForecaster,
+    ForecastResult,
+    ProphetForecaster,
+    ensemble_forecast,
+)
 
 logger = get_logger(__name__)
 
@@ -35,7 +42,7 @@ def fetch_fx(state: PipelineState) -> PipelineState:
             "latest_rate": latest,
             "rate_change_pct": round(change_pct, 2),
         }
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("fetch_fx failed: %s", exc)
         return {"errors": [f"fetch_fx: {exc}"]}
 
@@ -50,9 +57,75 @@ def fetch_news(state: PipelineState) -> PipelineState:
         fetcher = NewsFetcher()
         articles = fetcher.fetch()
         return {"raw_articles": articles}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("fetch_news failed: %s", exc)
         return {"errors": [f"fetch_news: {exc}"]}
+
+
+# ---------------------------------------------------------------------------
+# Node: check_materiality  (Etapa 2 — router / gate de costo)
+# ---------------------------------------------------------------------------
+
+_MATERIALITY_PROMPT = """You are a gatekeeper for a Colombian FX analysis pipeline.
+
+Given today's headlines, decide if ANY of them could materially move the
+USD/COP exchange rate (monetary policy, oil/commodities, fiscal or political
+risk, trade, US macro). Sports, entertainment and human-interest stories are
+NOT material.
+
+HEADLINES:
+{digest}
+"""
+
+
+def check_materiality(state: PipelineState) -> PipelineState:
+    """Cheap LLM gate: is there any FX-material news today?
+
+    Falls open (material=True) on LLM failure: better to spend one extra
+    analysis call than to silently drop a real signal.
+    """
+    articles = state.get("raw_articles", [])
+    if not articles:
+        return {
+            "has_material_news": False,
+            "materiality_reason": "No articles fetched today.",
+        }
+
+    digest = "\n".join(f"- {a.title}" for a in articles[:30])
+    try:
+        llm = get_chat_model("fast", temperature=0.0).with_structured_output(MaterialityGate)
+        raw = llm.invoke(_MATERIALITY_PROMPT.format(digest=digest))
+        gate = raw if isinstance(raw, MaterialityGate) else MaterialityGate.model_validate(raw)
+    except Exception as exc:
+        logger.warning("check_materiality LLM failed (%s) — failing open", exc)
+        return {
+            "has_material_news": True,
+            "materiality_reason": "Materiality check unavailable; assuming material.",
+        }
+
+    logger.info("Materiality gate: %s — %s", gate.has_material_news, gate.reason)
+    return {
+        "has_material_news": gate.has_material_news,
+        "materiality_reason": gate.reason,
+    }
+
+
+def route_materiality(state: PipelineState) -> str:
+    """Conditional edge: full analysis only when the gate says material."""
+    return "analyze_news" if state.get("has_material_news") else "skip_news"
+
+
+# ---------------------------------------------------------------------------
+# Node: skip_news  (ruta barata: cero tokens adicionales)
+# ---------------------------------------------------------------------------
+
+def skip_news(state: PipelineState) -> PipelineState:
+    """No material news: the forecast carries the call, with low confidence."""
+    reason = state.get("materiality_reason", "")
+    return {
+        "analyzed_articles": [],
+        "news_summary": f"No FX-material news today. {reason}".strip(),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -97,14 +170,14 @@ def run_forecast(state: PipelineState) -> PipelineState:
     try:
         prophet = ProphetForecaster()
         prophet_result: ForecastResult = prophet.fit_predict(df, horizon_days=horizon)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("Prophet failed: %s", exc)
         prophet_result = None  # type: ignore[assignment]
 
     try:
         arima = ARIMAForecaster()
         arima_result: ForecastResult = arima.fit_predict(df, horizon_days=horizon)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("ARIMA failed: %s", exc)
         arima_result = None  # type: ignore[assignment]
 
@@ -122,7 +195,7 @@ def run_forecast(state: PipelineState) -> PipelineState:
         try:
             r = forecaster_cls().fit_predict(train_df, horizon_days=horizon)  # type: ignore[operator]
             eval_metrics.append(evaluate(r, test_df))
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
 
     updates: PipelineState = {
@@ -182,7 +255,7 @@ def generate_report(state: PipelineState) -> PipelineState:
 {metrics_section or "N/A"}
 
 ---
-*Generated by cop-fx-intelligence at {datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}*
+*Generated by cop-fx-intelligence at {datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")}*
 """
 
     # Persist
@@ -234,6 +307,6 @@ def publish(state: PipelineState) -> PipelineState:
         tweet_id = str(resp.data["id"])  # type: ignore[index]
         logger.info("Tweet published: %s", tweet_id)
         return {"tweet_id": tweet_id}
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.error("publish tweet failed: %s", exc)
         return {"errors": [f"publish: {exc}"]}

@@ -2,15 +2,24 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
 
-from cop_fx.agents.nodes import analyze_news, fetch_fx, fetch_news, generate_report
+from cop_fx.agents.nodes import (
+    analyze_news,
+    check_materiality,
+    fetch_fx,
+    fetch_news,
+    generate_report,
+    route_materiality,
+    skip_news,
+)
 from cop_fx.agents.state import PipelineState
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
+from cop_fx.contracts import MaterialityGate
 from cop_fx.data.news_fetcher import Article
 
 
@@ -66,7 +75,7 @@ def test_fetch_news_populates_state() -> None:
             title="Dólar sube",
             summary="El dólar subió frente al peso.",
             url="https://example.com",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="Test",
         )
     ]
@@ -75,6 +84,67 @@ def test_fetch_news_populates_state() -> None:
         result = fetch_news(_base_state())
 
     assert result["raw_articles"] == fake_articles
+
+
+# ── check_materiality / router / skip_news ───────────────────────────────
+
+def _fake_article(title: str = "BanRep sube tasas") -> Article:
+    return Article(
+        title=title,
+        summary="resumen",
+        url="https://example.com/a",
+        published_at=datetime.now(tz=UTC),
+        source="Test",
+    )
+
+
+@pytest.mark.unit()
+def test_check_materiality_no_articles_is_not_material() -> None:
+    result = check_materiality(_base_state(raw_articles=[]))
+    assert result["has_material_news"] is False
+
+
+@pytest.mark.unit()
+def test_check_materiality_uses_gate_verdict() -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = MaterialityGate(
+        has_material_news=True, reason="BanRep decision moves rates"
+    )
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = check_materiality(_base_state(raw_articles=[_fake_article()]))
+
+    assert result["has_material_news"] is True
+    assert "BanRep" in result["materiality_reason"]
+
+
+@pytest.mark.unit()
+def test_check_materiality_fails_open_on_llm_error() -> None:
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("api down")
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = check_materiality(_base_state(raw_articles=[_fake_article()]))
+
+    assert result["has_material_news"] is True  # fail-open: no perder señal real
+
+
+@pytest.mark.unit()
+def test_route_materiality_branches() -> None:
+    assert route_materiality(_base_state(has_material_news=True)) == "analyze_news"
+    assert route_materiality(_base_state(has_material_news=False)) == "skip_news"
+    assert route_materiality(_base_state()) == "skip_news"  # ausente = no material
+
+
+@pytest.mark.unit()
+def test_skip_news_sets_empty_analysis_with_reason() -> None:
+    result = skip_news(_base_state(materiality_reason="Only sports today."))
+    assert result["analyzed_articles"] == []
+    assert "Only sports today." in result["news_summary"]
 
 
 # ── analyze_news ──────────────────────────────────────────────────────────
@@ -93,7 +163,7 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
             title="BanRep mantiene tasas",
             summary="Junta directiva decide no mover tasas.",
             url="https://x.com",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="Portafolio",
         )
     ]

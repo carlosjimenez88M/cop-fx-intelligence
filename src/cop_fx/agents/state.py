@@ -24,6 +24,8 @@ class PipelineState(TypedDict, total=False):
 
     # ── News ──────────────────────────────────────────────────────────
     raw_articles: list[Article]
+    has_material_news: bool         # veredicto del router (Etapa 2)
+    materiality_reason: str
     analyzed_articles: list[dict[str, Any]]  # enriched with topic/severity
     news_summary: str               # LLM-generated summary
 
