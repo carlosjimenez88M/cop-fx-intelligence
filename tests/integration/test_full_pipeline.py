@@ -10,7 +10,7 @@ import pytest
 
 from cop_fx.agents.graph import run_pipeline
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
-from cop_fx.contracts import AdjudicatorVerdict, HeadlineTag, MaterialityGate
+from cop_fx.contracts import AdjudicatorVerdict, HeadlineTag, MaterialityGate, TopStory
 from cop_fx.data.news_fetcher import Article
 
 
@@ -30,6 +30,11 @@ def _llm_by_schema(material: bool = True, calls: list[type] | None = None) -> Ma
                 HeadlineTag(index=0, topic="trade", material=True),
                 HeadlineTag(index=1, topic="energy_commodities", material=True),
             ],
+        ),
+        TopStory: TopStory(
+            chosen_index=0,
+            why_it_matters="El déficit comercial amplía la presión sobre la cuenta externa.",
+            watch_next="La próxima publicación del DANE.",
         ),
         AdjudicatorVerdict: AdjudicatorVerdict(
             direction="up",
@@ -72,14 +77,16 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
     fake_articles = [
         Article(
             title="Colombia registra déficit comercial",
-            summary="El déficit comercial se amplió en abril según el DANE.",
+            summary=("El déficit comercial se amplió en abril según el DANE, presionado "
+                     "por mayores importaciones de bienes de capital y menores ventas externas."),
             url="https://example.com/news/1",
             published_at=datetime.now(tz=UTC),
             source="El Tiempo",
         ),
         Article(
             title="Petróleo cae 3% por temores de recesión",
-            summary="Los precios del petróleo cayeron presionados por datos económicos de EEUU.",
+            summary=("Los precios del petróleo cayeron más de tres por ciento presionados por "
+                     "débiles datos económicos de Estados Unidos y mayores inventarios de crudo."),
             url="https://example.com/news/2",
             published_at=datetime.now(tz=UTC),
             source="Portafolio",
@@ -154,6 +161,11 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
     assert call.get("direction") in ("down", "up", "neutral")
     assert call.get("ts_signal", {}).get("direction") in ("down", "up", "neutral")
     assert "Directional Call" in final_state["report_markdown"]
+
+    # El agente editor eligió la noticia del día y llegó al reporte
+    top = final_state.get("top_story", {})
+    assert top.get("title")
+    assert "Noticia del día" in final_state["report_markdown"]
 
     # Regresión: el adjudicador (nodo deferred) debe ejecutarse EXACTAMENTE
     # una vez — un trigger extra hacia un nodo deferred lo dispara dos veces.

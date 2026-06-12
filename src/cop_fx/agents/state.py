@@ -41,6 +41,7 @@ class PipelineState(TypedDict, total=False):
     cluster_narratives: Annotated[list[str], operator.add]
     analyzed_articles: list[dict[str, Any]]  # consolidado por aggregate_signals
     news_signal: dict[str, Any]              # NewsSignal serializado (para el adjudicador)
+    top_story: dict[str, Any]                # la noticia del día (agente editor)
     news_summary: str               # LLM-generated summary
 
     # ── Adjudicación (Etapa 4) ────────────────────────────────────────

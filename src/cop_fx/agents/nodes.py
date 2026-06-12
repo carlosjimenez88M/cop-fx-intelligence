@@ -15,6 +15,8 @@ from cop_fx.agents.state import PipelineState, TopicWorkerState
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
 from cop_fx.config.settings import get_settings
 from cop_fx.contracts import (
+    RELEVANCE_WEIGHT,
+    SEVERITY_WEIGHT,
     AdjudicatorVerdict,
     ArticleAnalysis,
     DirectionalCall,
@@ -22,6 +24,7 @@ from cop_fx.contracts import (
     MaterialityGate,
     NewsSignal,
     TimeSeriesSignal,
+    TopStory,
     aggregate_news_signal,
 )
 from cop_fx.data.article_body import attach_bodies
@@ -228,6 +231,8 @@ def _analysis_to_dict(item: AnalyzedArticle) -> dict[str, object]:
     """Serializa un AnalyzedArticle a dict para el estado del grafo."""
     return {
         "title": item.article.title,
+        "source": item.article.source,
+        "author": getattr(item.article, "author", ""),
         "url": item.article.url,
         "topic": item.topic,
         "keywords": item.keywords,
@@ -368,6 +373,82 @@ def aggregate_signals(state: PipelineState) -> PipelineState:
         "news_signal": signal.model_dump(),
         "news_summary": summary,
     }
+
+
+# ---------------------------------------------------------------------------
+# Node: pick_top_story  (el agente editor — ¿cuál es LA noticia del día?)
+# ---------------------------------------------------------------------------
+
+_TOP_STORY_PROMPT = """You are the front-page editor of a Colombian FX desk.
+
+From the analyzed candidates below, choose THE single most important story
+of the day for the USD/COP direction. Importance = severity x transmission
+channel x novelty: a structural shock (tax reform, fiscal target change,
+BanRep surprise, oil regime change) beats routine or repeated noise.
+
+Write `why_it_matters` and `watch_next` in SPANISH.
+
+CANDIDATES:
+{candidates}
+"""
+
+
+def pick_top_story(state: PipelineState) -> PipelineState:
+    """Agente editor: elige la noticia MÁS importante del día.
+
+    Preselección determinista (severidad × relevancia, top 10) para no
+    gastar tokens en ruido; el LLM solo elige y justifica; el sistema
+    compone el registro con los datos reales del artículo elegido.
+    Fallback determinista: el candidato de mayor peso.
+    """
+    analyzed = state.get("worker_analyses", [])
+    candidates = [d for d in analyzed if d.get("fx_relevance") != "none"]
+    candidates.sort(
+        key=lambda d: (
+            SEVERITY_WEIGHT.get(str(d.get("severity", "low")), 0)
+            * RELEVANCE_WEIGHT.get(str(d.get("fx_relevance", "none")), 0)
+        ),
+        reverse=True,
+    )
+    candidates = candidates[:10]
+    if not candidates:
+        return {"top_story": {}}
+
+    digest = "\n".join(
+        f"[{i}] ({d.get('source', '?')} · {d['topic']} · {d['severity']}/{d['fx_relevance']}"
+        f" · canal {d['fx_channel']}) {d['title']} — {d['reasoning']}"
+        for i, d in enumerate(candidates)
+    )
+
+    def _compose(chosen: dict, why: str, watch: str) -> dict[str, object]:
+        return {
+            "title": chosen["title"],
+            "source": chosen.get("source", ""),
+            "url": chosen.get("url", ""),
+            "topic": chosen["topic"],
+            "fx_channel": chosen["fx_channel"],
+            "severity": chosen["severity"],
+            "why_it_matters": why,
+            "watch_next": watch,
+        }
+
+    try:
+        llm = get_chat_model("fast", temperature=0.0).with_structured_output(TopStory)
+        raw = llm.invoke(_TOP_STORY_PROMPT.format(candidates=digest))
+        ts = raw if isinstance(raw, TopStory) else TopStory.model_validate(raw)
+        chosen = candidates[min(ts.chosen_index, len(candidates) - 1)]
+        top = _compose(chosen, ts.why_it_matters, ts.watch_next)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pick_top_story LLM failed (%s) — fallback determinista", exc)
+        chosen = candidates[0]
+        top = _compose(
+            chosen,
+            f"Mayor peso severidad×relevancia del día: {chosen['reasoning']}",
+            "Seguimiento del tema en la próxima corrida.",
+        )
+
+    logger.info("Top story: %s (%s)", top["title"], top["source"])
+    return {"top_story": top}
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +593,10 @@ Cluster narratives:
 TIME-SERIES SIGNAL (Prophet+ARIMA ensemble, deterministic sign):
 {ts_signal}
 
+TOP STORY OF THE DAY (chosen by the desk-editor agent — give it extra
+weight when judging which signal should dominate):
+{top_story}
+
 MARKET CONTEXT (deterministic, yesterday's moves). The Colombian equity
 aggregate is the ONLY empirically validated leading indicator of USD/COP
 (equity up yesterday => COP tends to strengthen => USD/COP DOWN); DXY and
@@ -594,11 +679,13 @@ def adjudicate(state: PipelineState) -> PipelineState:
     )
 
     market = state.get("market_signal") or {}
+    top_story = state.get("top_story") or {}
     prompt = _ADJUDICATOR_PROMPT.format(
         horizon=horizon,
         news_signal=news.model_dump_json(),
         narratives=state.get("news_summary", "(no narratives)"),
         ts_signal=ts.model_dump_json(),
+        top_story=top_story or "(no top story today)",
         market_signal=market or "(not available today)",
         latest=state.get("latest_rate", 0.0),
         change=state.get("rate_change_pct", 0.0),
@@ -654,6 +741,7 @@ def record_prediction(state: PipelineState) -> PipelineState:
             call,
             run_date=state.get("run_date", date.today().isoformat()),
             latest_rate=float(latest) if latest else None,
+            top_story=state.get("top_story") or None,
         )
         fx_df = state.get("fx_df")
         if fx_df is not None and not fx_df.empty:
@@ -715,6 +803,14 @@ def generate_report(state: PipelineState) -> PipelineState:
                 f"Brent {market['brent_ret_1d_pct']:+.2f}% "
                 f"→ sesgo {market['direction']}\n\n"
             )
+        top = state.get("top_story") or {}
+        top_story_section = ""
+        if top:
+            top_story_section = (
+                f"**📌 Noticia del día:** {top['title']} ({top['source']})\n\n"
+                f"*Por qué importa:* {top['why_it_matters']}\n\n"
+                f"*Vigilar:* {top['watch_next']}\n\n"
+            )
         verdict_section = f"""## Directional Call — {call["horizon_days"]} días
 **{labels[call["direction"]]}** · confianza **{call["confidence"]:.2f}** · reconciliación **{call["reconciliation"]}**
 
@@ -722,7 +818,7 @@ Señales: noticias = {call["news_signal"]["direction"]} (score {call["news_signa
 serie = {call["ts_signal"]["direction"]} ({call["ts_signal"]["yhat_delta_pct"]:+.2f}%, \
 modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
 
-{market_line}**Racional:** {call["rationale"]}
+{market_line}{top_story_section}**Racional:** {call["rationale"]}
 
 **Abogado del diablo:** {call["devils_advocate"]}
 

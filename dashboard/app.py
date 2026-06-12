@@ -149,6 +149,13 @@ with tab_call:
             st.markdown("**📈 Señal de la serie**")
             st.write(f"Dirección: `{latest['ts_direction']}` · Δ forecast: `{latest['ts_delta_pct']:+.2f}%`")
 
+        if latest.get("top_story_title"):
+            st.markdown("**📌 La noticia más importante del día** *(elegida por el agente editor)*")
+            st.info(
+                f"**{latest['top_story_title']}** — {latest['top_story_source']}\n\n"
+                f"{latest['top_story_why']}"
+            )
+
         st.markdown("**🧠 Racional del adjudicador**")
         st.write(latest["rationale"])
         st.markdown("**😈 Abogado del diablo** *(obligatorio por contrato — combate el sesgo de confirmación)*")

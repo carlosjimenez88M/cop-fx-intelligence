@@ -136,6 +136,24 @@ class MaterialityGate(BaseModel):
     tags: list[HeadlineTag] = Field(default_factory=list)
 
 
+class TopStory(BaseModel):
+    """La noticia MÁS importante del día para el USD/COP — la elige un agente.
+
+    El agente solo ELIGE entre candidatos ya analizados y justifica; los
+    hechos (título, fuente, canal) los inyecta el sistema desde el artículo
+    elegido. Importancia = severidad × canal de transmisión × novedad
+    (un shock estructural le gana al ruido rutinario).
+    """
+
+    chosen_index: int = Field(ge=0, description="Índice del candidato elegido en la lista")
+    why_it_matters: str = Field(
+        min_length=30, description="Por qué ES la noticia del día (en español)"
+    )
+    watch_next: str = Field(
+        min_length=10, description="Qué vigilar a continuación (en español)"
+    )
+
+
 class NewsSignal(BaseModel):
     """Señal direccional agregada de las noticias del día."""
 

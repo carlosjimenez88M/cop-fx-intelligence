@@ -16,6 +16,7 @@ from cop_fx.agents.nodes import (
     fetch_news,
     generate_report,
     orchestrate,
+    pick_top_story,
     publish,
     record_prediction,
     route_materiality,
@@ -72,6 +73,7 @@ def build_graph() -> StateGraph:
     graph.add_node("orchestrate", orchestrate)
     graph.add_node("topic_worker", topic_worker)
     graph.add_node("aggregate_signals", aggregate_signals)
+    graph.add_node("pick_top_story", pick_top_story)
     graph.add_node("run_forecast", run_forecast)
     graph.add_node("adjudicate", adjudicate, defer=True)
     graph.add_node("generate_report", generate_report)
@@ -97,9 +99,12 @@ def build_graph() -> StateGraph:
     graph.add_conditional_edges("orchestrate", fan_out_clusters, ["topic_worker"])
     graph.add_edge("topic_worker", "aggregate_signals")
 
+    # El agente editor elige LA noticia del día con los análisis ya hechos
+    graph.add_edge("aggregate_signals", "pick_top_story")
+
     # Etapa 4: convergencia en el adjudicador → reporte → publicación
     # (sin arista run_forecast→adjudicate: ver nota sobre defer en el docstring)
-    graph.add_edge("aggregate_signals", "adjudicate")
+    graph.add_edge("pick_top_story", "adjudicate")
     graph.add_edge("skip_news", "adjudicate")
     graph.add_edge("adjudicate", "generate_report")
     graph.add_edge("generate_report", "record_prediction")

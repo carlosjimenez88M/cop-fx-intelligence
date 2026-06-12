@@ -584,3 +584,63 @@ def test_order_articles_same_day_interleaves_sources() -> None:
     assert "Portafolio" in top4_sources[:2]
     # La fecha sigue mandando: lo de ayer va al final
     assert ordered[-1].title == "y1"
+
+
+# ── pick_top_story: el agente editor ─────────────────────────────────────
+
+def _wa(title: str, severity: str = "high", relevance: str = "direct") -> dict:
+    return {
+        "title": title, "source": "La República", "url": f"https://x.com/{title}",
+        "topic": "fiscal_policy", "fx_channel": "country_risk",
+        "severity": severity, "fx_relevance": relevance, "bullish_cop": False,
+        "reasoning": "presión fiscal",
+    }
+
+
+@pytest.mark.unit()
+def test_pick_top_story_uses_editor_choice() -> None:
+    from cop_fx.agents.nodes import pick_top_story
+    from cop_fx.contracts import TopStory
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.return_value = TopStory(
+        chosen_index=1,
+        why_it_matters="La reforma tributaria redefine la senda fiscal y la prima de riesgo país.",
+        watch_next="El texto del proyecto de ley y la reacción de las calificadoras.",
+    )
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    analyses = [_wa("Dato de empleo"), _wa("Reforma tributaria"), _wa("Peaje sube", "low")]
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = pick_top_story(_base_state(worker_analyses=analyses))
+
+    top = result["top_story"]
+    assert top["title"] == "Reforma tributaria"          # eligió el índice 1
+    assert top["source"] == "La República"               # hechos del sistema, no del LLM
+    assert "fiscal" in top["why_it_matters"]
+
+
+@pytest.mark.unit()
+def test_pick_top_story_fallback_takes_heaviest() -> None:
+    from cop_fx.agents.nodes import pick_top_story
+
+    structured_llm = MagicMock()
+    structured_llm.invoke.side_effect = RuntimeError("api down")
+    base_llm = MagicMock()
+    base_llm.with_structured_output.return_value = structured_llm
+
+    analyses = [_wa("Ruido", "low", "indirect"), _wa("Shock fiscal", "high", "direct")]
+    with patch("cop_fx.agents.nodes.get_chat_model", return_value=base_llm):
+        result = pick_top_story(_base_state(worker_analyses=analyses))
+
+    assert result["top_story"]["title"] == "Shock fiscal"  # mayor severidad×relevancia
+
+
+@pytest.mark.unit()
+def test_pick_top_story_empty_when_no_relevant_news() -> None:
+    from cop_fx.agents.nodes import pick_top_story
+
+    analyses = [_wa("Partido de fútbol", "low", "none")]
+    result = pick_top_story(_base_state(worker_analyses=analyses))
+    assert result["top_story"] == {}  # sin candidatos: ni siquiera llama al LLM

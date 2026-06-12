@@ -54,12 +54,23 @@ CREATE TABLE IF NOT EXISTS predictions (
 class PredictionStore:
     """Persistencia SQLite de los DirectionalCall diarios + su evaluación."""
 
+    # Columnas añadidas después del schema inicial — migración liviana.
+    _EXTRA_COLS: dict[str, str] = {
+        "top_story_title": "TEXT",
+        "top_story_source": "TEXT",
+        "top_story_why": "TEXT",
+    }
+
     def __init__(self, db_path: str | Path | None = None) -> None:
         # Default absoluto (cop_fx.paths): independiente del cwd.
         self._db_path = Path(db_path) if db_path is not None else DATA_DIR / "predictions.db"
         self._db_path.parent.mkdir(parents=True, exist_ok=True)
         with self._conn() as conn:
             conn.execute(_SCHEMA)
+            existing = {row[1] for row in conn.execute("PRAGMA table_info(predictions)")}
+            for col, sql_type in self._EXTRA_COLS.items():
+                if col not in existing:
+                    conn.execute(f"ALTER TABLE predictions ADD COLUMN {col} {sql_type}")
 
     def _conn(self) -> sqlite3.Connection:
         return sqlite3.connect(self._db_path)
@@ -69,17 +80,24 @@ class PredictionStore:
     # ------------------------------------------------------------------
 
     def save(
-        self, call: DirectionalCall, *, run_date: str, latest_rate: float | None
+        self,
+        call: DirectionalCall,
+        *,
+        run_date: str,
+        latest_rate: float | None,
+        top_story: dict[str, Any] | None = None,
     ) -> None:
         """Upsert por run_date: re-correr el día refresca la predicción."""
+        top = top_story or {}
         with self._conn() as conn:
             conn.execute(
                 """
                 INSERT INTO predictions
                     (run_date, horizon_days, direction, confidence, reconciliation,
                      news_direction, news_score, ts_direction, ts_delta_pct,
-                     latest_rate, rationale, devils_advocate, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     latest_rate, rationale, devils_advocate, created_at,
+                     top_story_title, top_story_source, top_story_why)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(run_date) DO UPDATE SET
                     horizon_days = excluded.horizon_days,
                     direction = excluded.direction,
@@ -93,6 +111,9 @@ class PredictionStore:
                     rationale = excluded.rationale,
                     devils_advocate = excluded.devils_advocate,
                     created_at = excluded.created_at,
+                    top_story_title = excluded.top_story_title,
+                    top_story_source = excluded.top_story_source,
+                    top_story_why = excluded.top_story_why,
                     actual_rate = NULL, actual_change_pct = NULL,
                     actual_direction = NULL, hit = NULL, evaluated_at = NULL
                 """,
@@ -110,6 +131,9 @@ class PredictionStore:
                     call.rationale,
                     call.devils_advocate,
                     datetime.now(UTC).isoformat(),
+                    top.get("title"),
+                    top.get("source"),
+                    top.get("why_it_matters"),
                 ),
             )
         logger.info("Prediction saved: %s → %s (%.2f)", run_date, call.direction, call.confidence)
