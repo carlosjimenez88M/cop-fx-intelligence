@@ -18,18 +18,6 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-TOPIC_LABELS = [
-    "monetary_policy",  # BanRep interest rate decisions, inflation
-    "trade",            # imports / exports / trade balance
-    "political_risk",   # elections, social unrest, regulation
-    "commodities",      # oil, coffee, coal prices
-    "macro",            # GDP, employment, fiscal deficit
-    "other",
-]
-
-SEVERITY_LABELS = ["high", "medium", "low"]
-
-
 @dataclass
 class AnalyzedArticle:
     article: Article
@@ -38,6 +26,9 @@ class AnalyzedArticle:
     bullish_cop: bool
     reasoning: str
     keywords: list[str]
+    entities: list[str]
+    fx_relevance: str
+    fx_channel: str
 
 
 @dataclass
@@ -50,16 +41,24 @@ class NewsAnalysis:
 
 _PROMPT_TEMPLATE = """You are a Colombian FX market analyst.
 
-Classify each article by its expected impact on the USD/COP exchange rate:
-  - topic: the article's economic category
-  - keywords: 3-5 key terms in Spanish
-  - severity: expected impact on the COP/USD rate (high | medium | low)
-  - bullish_cop: true if the news is likely to strengthen COP vs USD
-  - reasoning: <= 20 words justifying your choice
+Classify each article. The taxonomy has TWO levels — what the news IS
+(`topic`) and HOW it transmits to the USD/COP rate (`fx_channel`):
   - index: the 0-based position of the article in the list below
+  - topic: the article's domain (sports and culture stories exist in the
+    taxonomy — do NOT force them into economic categories)
+  - keywords: 3-5 key terms in Spanish
+  - entities: up to 5 named entities (people, institutions, companies, places)
+  - fx_relevance: direct | indirect | none. Think second-order channels:
+    a drought is indirect via food inflation; an epidemic via growth and
+    fiscal risk; a football match is none.
+  - fx_channel: the transmission mechanism (interest_rates, inflation,
+    terms_of_trade, country_risk, capital_flows, growth, none)
+  - severity: expected magnitude of the FX impact (high | medium | low)
+  - bullish_cop: true if the news is likely to strengthen COP vs USD
+  - reasoning: <= 20 words naming the channel explicitly
 
 Also write `market_narrative`: 3 sentences on the day's FX outlook,
-based ONLY on these articles.
+based ONLY on the articles with fx_relevance != none.
 
 ARTICLES:
 {digest}
@@ -108,6 +107,9 @@ class NewsAnalyzer:
                     bullish_cop=item.bullish_cop,
                     reasoning=item.reasoning,
                     keywords=item.keywords,
+                    entities=item.entities,
+                    fx_relevance=item.fx_relevance,
+                    fx_channel=item.fx_channel,
                 )
             )
         return NewsAnalysis(items=items, narrative=batch.market_narrative)
@@ -122,7 +124,8 @@ class NewsAnalyzer:
         result: list[AnalyzedArticle] = []
         for article in articles:
             text = (article.title + " " + article.summary).lower()
-            severity = "high" if any(kw in text for kw in high_kw) else "low"
+            hits = sorted(kw for kw in high_kw if kw in text)
+            severity = "high" if hits else "low"
             result.append(
                 AnalyzedArticle(
                     article=article,
@@ -130,7 +133,10 @@ class NewsAnalyzer:
                     severity=severity,
                     bullish_cop=False,
                     reasoning="fallback: keyword heuristic",
-                    keywords=sorted(kw for kw in high_kw if kw in text)[:5],
+                    keywords=hits[:5] or ["sin_clasificar"],
+                    entities=[],
+                    fx_relevance="indirect" if hits else "none",
+                    fx_channel="terms_of_trade" if hits else "none",
                 )
             )
         return result
