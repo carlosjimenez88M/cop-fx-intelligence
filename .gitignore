@@ -225,3 +225,6 @@ reports/
 
 # Local data lake (bronze/silver/gold) — datasets live in GCS/BigQuery, not git
 /data/
+
+# Exports HTML de notebooks (artefactos de vista)
+notebooks/html/
