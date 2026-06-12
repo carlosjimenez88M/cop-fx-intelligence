@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from pathlib import Path
 
-from cop_fx.agents.state import PipelineState
-from cop_fx.analysis.news_analyzer import NewsAnalyzer
+from langgraph.types import Send
+
+from cop_fx.agents.state import PipelineState, TopicWorkerState
+from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
 from cop_fx.config.settings import get_settings
-from cop_fx.contracts import MaterialityGate
+from cop_fx.contracts import ArticleAnalysis, MaterialityGate, aggregate_news_signal
 from cop_fx.data.fx_fetcher import FXFetcher
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
@@ -22,6 +24,9 @@ from cop_fx.timeseries.models import (
 )
 
 logger = get_logger(__name__)
+
+# Cota superior de workers por corrida: controla el costo en días muy noticiosos.
+MAX_TOPIC_WORKERS = 6
 
 
 # ---------------------------------------------------------------------------
@@ -68,10 +73,20 @@ def fetch_news(state: PipelineState) -> PipelineState:
 
 _MATERIALITY_PROMPT = """You are a gatekeeper for a Colombian FX analysis pipeline.
 
-Given today's headlines, decide if ANY of them could materially move the
-USD/COP exchange rate (monetary policy, oil/commodities, fiscal or political
-risk, trade, US macro). Sports, entertainment and human-interest stories are
-NOT material.
+For EACH headline below, produce a tag with its 0-based index, its topic
+(use the full taxonomy — sports and culture have their own categories),
+and whether THAT headline could materially move the USD/COP exchange rate.
+
+Think in transmission channels, including second-order ones:
+  - monetary/fiscal policy, oil/commodities, political risk, trade, US macro
+    are usually material;
+  - public health crises transmit via growth and fiscal cost;
+  - climate events (drought, El Niño, floods) via food inflation and energy;
+  - strikes and social unrest via country risk;
+  - sports, entertainment and human-interest stories are NOT material.
+
+Then set `has_material_news` = true if at least one headline is material,
+and explain the overall verdict in `reason`.
 
 HEADLINES:
 {digest}
@@ -81,6 +96,10 @@ HEADLINES:
 def check_materiality(state: PipelineState) -> PipelineState:
     """Cheap LLM gate: is there any FX-material news today?
 
+    The same single call also tags every headline with a coarse topic —
+    those tags seed the topic clusters for the Etapa 3 fan-out, so the
+    router costs nothing extra.
+
     Falls open (material=True) on LLM failure: better to spend one extra
     analysis call than to silently drop a real signal.
     """
@@ -89,9 +108,10 @@ def check_materiality(state: PipelineState) -> PipelineState:
         return {
             "has_material_news": False,
             "materiality_reason": "No articles fetched today.",
+            "headline_tags": [],
         }
 
-    digest = "\n".join(f"- {a.title}" for a in articles[:30])
+    digest = "\n".join(f"[{i}] {a.title}" for i, a in enumerate(articles[:30]))
     try:
         llm = get_chat_model("fast", temperature=0.0).with_structured_output(MaterialityGate)
         raw = llm.invoke(_MATERIALITY_PROMPT.format(digest=digest))
@@ -101,18 +121,20 @@ def check_materiality(state: PipelineState) -> PipelineState:
         return {
             "has_material_news": True,
             "materiality_reason": "Materiality check unavailable; assuming material.",
+            "headline_tags": [],
         }
 
     logger.info("Materiality gate: %s — %s", gate.has_material_news, gate.reason)
     return {
         "has_material_news": gate.has_material_news,
         "materiality_reason": gate.reason,
+        "headline_tags": [t.model_dump() for t in gate.tags],
     }
 
 
 def route_materiality(state: PipelineState) -> str:
     """Conditional edge: full analysis only when the gate says material."""
-    return "analyze_news" if state.get("has_material_news") else "skip_news"
+    return "orchestrate" if state.get("has_material_news") else "skip_news"
 
 
 # ---------------------------------------------------------------------------
@@ -129,7 +151,140 @@ def skip_news(state: PipelineState) -> PipelineState:
 
 
 # ---------------------------------------------------------------------------
-# Node: analyze_news
+# Etapa 3 — orchestrator → Send(topic_worker x N) → aggregate_signals
+# ---------------------------------------------------------------------------
+
+def _analysis_to_dict(item: AnalyzedArticle) -> dict[str, object]:
+    """Serializa un AnalyzedArticle a dict para el estado del grafo."""
+    return {
+        "title": item.article.title,
+        "url": item.article.url,
+        "topic": item.topic,
+        "keywords": item.keywords,
+        "entities": item.entities,
+        "fx_relevance": item.fx_relevance,
+        "fx_channel": item.fx_channel,
+        "severity": item.severity,
+        "bullish_cop": item.bullish_cop,
+        "reasoning": item.reasoning,
+    }
+
+
+def orchestrate(state: PipelineState) -> PipelineState:
+    """Agrupa artículos en clusters por tópico usando los tags del gate.
+
+    Determinista, cero LLM: el gate ya pagó la etiqueta gruesa. Los tags
+    no-materiales se descartan; los titulares sin tag van a "other".
+    Si hay más de MAX_TOPIC_WORKERS clusters, los más pequeños se funden
+    en "other" para acotar el costo del fan-out.
+    """
+    articles = state.get("raw_articles", [])
+    tags = state.get("headline_tags", [])
+
+    tag_by_index = {t["index"]: t for t in tags}
+    clusters: dict[str, list[int]] = {}
+    for i in range(min(len(articles), 30)):
+        tag = tag_by_index.get(i)
+        if tag is not None and not tag.get("material", True):
+            continue  # el gate ya dijo que este titular no mueve el FX
+        topic = tag["topic"] if tag is not None else "other"
+        clusters.setdefault(topic, []).append(i)
+
+    if not clusters:  # gate material pero sin tags utilizables → un solo cluster
+        clusters = {"other": list(range(min(len(articles), 30)))}
+
+    if len(clusters) > MAX_TOPIC_WORKERS:
+        by_size = sorted(clusters.items(), key=lambda kv: len(kv[1]), reverse=True)
+        keep = dict(by_size[: MAX_TOPIC_WORKERS - 1])
+        overflow = [i for _, idxs in by_size[MAX_TOPIC_WORKERS - 1 :] for i in idxs]
+        keep.setdefault("other", []).extend(overflow)
+        clusters = keep
+
+    logger.info(
+        "Orchestrator: %d clusters → %s",
+        len(clusters),
+        {t: len(idx) for t, idx in clusters.items()},
+    )
+    return {"clusters": clusters}
+
+
+def fan_out_clusters(state: PipelineState) -> list[Send]:
+    """Conditional edge dinámico: un Send (= un worker) por cluster de tópico."""
+    articles = state.get("raw_articles", [])
+    clusters = state.get("clusters", {})
+    return [
+        Send(
+            "topic_worker",
+            {
+                "cluster_topic": topic,
+                "cluster_articles": [articles[i] for i in indices],
+            },
+        )
+        for topic, indices in clusters.items()
+        if indices
+    ]
+
+
+def topic_worker(state: TopicWorkerState) -> PipelineState:
+    """Worker por cluster: análisis profundo de SOLO sus artículos.
+
+    Recibe el payload del `Send` (no el estado global). Prompt chaining
+    interno vía NewsAnalyzer (extraer → clasificar → canal de transmisión
+    → impacto). Su salida se fusiona al estado global por los reducers de
+    worker_analyses / cluster_narratives.
+    """
+    topic = state.get("cluster_topic", "other")
+    articles = state.get("cluster_articles", [])
+    if not articles:
+        return {"worker_analyses": [], "cluster_narratives": []}
+
+    analysis = NewsAnalyzer().analyze(articles)
+    logger.info("topic_worker[%s]: %d artículos analizados", topic, len(analysis.items))
+    return {
+        "worker_analyses": [_analysis_to_dict(item) for item in analysis.items],
+        "cluster_narratives": [f"[{topic}] {analysis.narrative}"],
+    }
+
+
+def aggregate_signals(state: PipelineState) -> PipelineState:
+    """Consolida los workers en una señal direccional — determinista, sin LLM."""
+    analyzed = state.get("worker_analyses", [])
+
+    analyses = []
+    titles: dict[int, str] = {}
+    for i, d in enumerate(analyzed):
+        titles[i] = str(d.get("title", ""))
+        analyses.append(
+            ArticleAnalysis(
+                index=i,
+                topic=d.get("topic", "other"),
+                keywords=list(d.get("keywords") or ["sin_clasificar"]),
+                entities=list(d.get("entities") or []),
+                fx_relevance=d.get("fx_relevance", "none"),
+                fx_channel=d.get("fx_channel", "none"),
+                severity=d.get("severity", "low"),
+                bullish_cop=bool(d.get("bullish_cop", False)),
+                reasoning=str(d.get("reasoning", ""))[:240],
+            )
+        )
+
+    signal = aggregate_news_signal(analyses, titles)
+    summary = "\n".join(state.get("cluster_narratives", [])) or "No analysis available."
+    logger.info(
+        "Señal de noticias: %s (score=%.2f, drivers=%d)",
+        signal.direction,
+        signal.score,
+        len(signal.drivers),
+    )
+    return {
+        "analyzed_articles": analyzed,
+        "news_signal": signal.model_dump(),
+        "news_summary": summary,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Node: analyze_news  (modo una-sola-llamada — Etapa 1; lo usan notebooks/tests)
 # ---------------------------------------------------------------------------
 
 def analyze_news(state: PipelineState) -> PipelineState:
@@ -139,19 +294,7 @@ def analyze_news(state: PipelineState) -> PipelineState:
         return {"analyzed_articles": [], "news_summary": "No news available."}
 
     analysis = NewsAnalyzer().analyze(articles[:20])
-
-    analyzed = [
-        {
-            "title": item.article.title,
-            "url": item.article.url,
-            "topic": item.topic,
-            "keywords": item.keywords,
-            "severity": item.severity,
-            "bullish_cop": item.bullish_cop,
-            "reasoning": item.reasoning,
-        }
-        for item in analysis.items
-    ]
+    analyzed = [_analysis_to_dict(item) for item in analysis.items]
     return {"analyzed_articles": analyzed, "news_summary": analysis.narrative}
 
 

@@ -7,15 +7,21 @@ from unittest.mock import MagicMock, patch
 
 import pandas as pd
 import pytest
+from langgraph.types import Send
 
 from cop_fx.agents.nodes import (
+    MAX_TOPIC_WORKERS,
+    aggregate_signals,
     analyze_news,
     check_materiality,
+    fan_out_clusters,
     fetch_fx,
     fetch_news,
     generate_report,
+    orchestrate,
     route_materiality,
     skip_news,
+    topic_worker,
 )
 from cop_fx.agents.state import PipelineState
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
@@ -135,7 +141,7 @@ def test_check_materiality_fails_open_on_llm_error() -> None:
 
 @pytest.mark.unit()
 def test_route_materiality_branches() -> None:
-    assert route_materiality(_base_state(has_material_news=True)) == "analyze_news"
+    assert route_materiality(_base_state(has_material_news=True)) == "orchestrate"
     assert route_materiality(_base_state(has_material_news=False)) == "skip_news"
     assert route_materiality(_base_state()) == "skip_news"  # ausente = no material
 
@@ -145,6 +151,128 @@ def test_skip_news_sets_empty_analysis_with_reason() -> None:
     result = skip_news(_base_state(materiality_reason="Only sports today."))
     assert result["analyzed_articles"] == []
     assert "Only sports today." in result["news_summary"]
+
+
+# ── Etapa 3: orchestrate / fan_out / topic_worker / aggregate_signals ────
+
+@pytest.mark.unit()
+def test_orchestrate_clusters_by_gate_tags() -> None:
+    articles = [_fake_article(f"t{i}") for i in range(4)]
+    tags = [
+        {"index": 0, "topic": "monetary_policy", "material": True},
+        {"index": 1, "topic": "sports", "material": False},   # descartado
+        {"index": 2, "topic": "monetary_policy", "material": True},
+        # índice 3 sin tag → cae en "other"
+    ]
+    result = orchestrate(_base_state(raw_articles=articles, headline_tags=tags))
+
+    clusters = result["clusters"]
+    assert clusters["monetary_policy"] == [0, 2]
+    assert clusters["other"] == [3]
+    assert all(1 not in idx for idx in clusters.values())
+
+
+@pytest.mark.unit()
+def test_orchestrate_caps_worker_count() -> None:
+    articles = [_fake_article(f"t{i}") for i in range(10)]
+    tags = [
+        {"index": i, "topic": topic, "material": True}
+        for i, topic in enumerate(
+            ["monetary_policy", "fiscal_policy", "trade", "political_risk",
+             "security_conflict", "energy_commodities", "agro_commodities",
+             "public_health", "environment_climate", "labor_social"]
+        )
+    ]
+    result = orchestrate(_base_state(raw_articles=articles, headline_tags=tags))
+
+    clusters = result["clusters"]
+    assert len(clusters) <= MAX_TOPIC_WORKERS
+    assert sum(len(v) for v in clusters.values()) == 10  # nada se pierde
+
+
+@pytest.mark.unit()
+def test_fan_out_emits_one_send_per_cluster() -> None:
+    articles = [_fake_article(f"t{i}") for i in range(3)]
+    state = _base_state(
+        raw_articles=articles,
+        clusters={"monetary_policy": [0, 2], "trade": [1]},
+    )
+    sends = fan_out_clusters(state)
+
+    assert all(isinstance(s, Send) for s in sends)
+    assert {s.node for s in sends} == {"topic_worker"}
+    by_topic = {s.arg["cluster_topic"]: s.arg["cluster_articles"] for s in sends}
+    assert [a.title for a in by_topic["monetary_policy"]] == ["t0", "t2"]
+    assert [a.title for a in by_topic["trade"]] == ["t1"]
+
+
+@pytest.mark.unit()
+def test_topic_worker_returns_reducer_updates() -> None:
+    article = _fake_article()
+    verdict = AnalyzedArticle(
+        article=article,
+        topic="monetary_policy",
+        severity="high",
+        bullish_cop=True,
+        reasoning="Rate hike",
+        keywords=["tasas"],
+        entities=["BanRep"],
+        fx_relevance="direct",
+        fx_channel="interest_rates",
+    )
+    with patch("cop_fx.agents.nodes.NewsAnalyzer") as MockAnalyzer:
+        MockAnalyzer.return_value.analyze.return_value = NewsAnalysis(
+            items=[verdict], narrative="Peso firme."
+        )
+        result = topic_worker(
+            {"cluster_topic": "monetary_policy", "cluster_articles": [article]}
+        )
+
+    assert result["worker_analyses"][0]["fx_channel"] == "interest_rates"
+    assert result["cluster_narratives"] == ["[monetary_policy] Peso firme."]
+
+
+@pytest.mark.unit()
+def test_aggregate_signals_is_deterministic() -> None:
+    worker_analyses = [
+        {
+            "title": "BanRep sube tasas",
+            "url": "https://x.com/1",
+            "topic": "monetary_policy",
+            "keywords": ["tasas"],
+            "entities": ["BanRep"],
+            "fx_relevance": "direct",
+            "fx_channel": "interest_rates",
+            "severity": "high",
+            "bullish_cop": True,
+            "reasoning": "r",
+        },
+        {
+            "title": "Colombia gana el partido",
+            "url": "https://x.com/2",
+            "topic": "sports",
+            "keywords": ["fútbol"],
+            "entities": [],
+            "fx_relevance": "none",
+            "fx_channel": "none",
+            "severity": "low",
+            "bullish_cop": True,   # irrelevante: pesa 0
+            "reasoning": "r",
+        },
+    ]
+    result = aggregate_signals(
+        _base_state(
+            worker_analyses=worker_analyses,
+            cluster_narratives=["[monetary_policy] Peso firme."],
+        )
+    )
+
+    signal = result["news_signal"]
+    assert signal["direction"] == "down"      # solo pesa la noticia de tasas
+    assert signal["score"] == 1.0
+    assert signal["drivers"] == ["BanRep sube tasas"]
+    assert "[monetary_policy]" in result["news_summary"]
+    assert len(result["analyzed_articles"]) == 2
 
 
 # ── analyze_news ──────────────────────────────────────────────────────────
@@ -175,6 +303,9 @@ def test_analyze_news_uses_analyzer(monkeypatch) -> None:  # type: ignore[no-unt
         bullish_cop=False,
         reasoning="Rates on hold",
         keywords=["BanRep", "tasas"],
+        entities=["BanRep"],
+        fx_relevance="direct",
+        fx_channel="interest_rates",
     )
     mock_analysis = NewsAnalysis(items=[verdict], narrative="Market is neutral.")
 

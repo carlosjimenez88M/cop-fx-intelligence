@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 
 import pandas as pd
@@ -10,7 +10,7 @@ import pytest
 
 from cop_fx.agents.graph import run_pipeline
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalysis
-from cop_fx.contracts import MaterialityGate
+from cop_fx.contracts import HeadlineTag, MaterialityGate
 from cop_fx.data.news_fetcher import Article
 
 
@@ -18,7 +18,12 @@ def _material_gate_llm(material: bool = True) -> MagicMock:
     """Mock de get_chat_model para el nodo check_materiality."""
     structured_llm = MagicMock()
     structured_llm.invoke.return_value = MaterialityGate(
-        has_material_news=material, reason="mocked gate"
+        has_material_news=material,
+        reason="mocked gate",
+        tags=[
+            HeadlineTag(index=0, topic="trade", material=True),
+            HeadlineTag(index=1, topic="energy_commodities", material=True),
+        ],
     )
     base_llm = MagicMock()
     base_llm.with_structured_output.return_value = structured_llm
@@ -42,14 +47,14 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
             title="Colombia registra déficit comercial",
             summary="El déficit comercial se amplió en abril según el DANE.",
             url="https://example.com/news/1",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="El Tiempo",
         ),
         Article(
             title="Petróleo cae 3% por temores de recesión",
             summary="Los precios del petróleo cayeron presionados por datos económicos de EEUU.",
             url="https://example.com/news/2",
-            published_at=datetime.now(tz=timezone.utc),
+            published_at=datetime.now(tz=UTC),
             source="Portafolio",
         ),
     ]
@@ -63,14 +68,20 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path) 
                 bullish_cop=False,
                 reasoning="deficit",
                 keywords=["déficit", "comercio"],
+                entities=["DANE"],
+                fx_relevance="direct",
+                fx_channel="terms_of_trade",
             ),
             AnalyzedArticle(
                 article=fake_articles[1],
-                topic="commodities",
+                topic="energy_commodities",
                 severity="high",
                 bullish_cop=False,
                 reasoning="oil drop",
                 keywords=["petróleo", "recesión"],
+                entities=["Brent"],
+                fx_relevance="direct",
+                fx_channel="terms_of_trade",
             ),
         ],
         narrative="Peso under pressure from weak commodities and trade deficit.",

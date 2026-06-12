@@ -12,6 +12,13 @@ from cop_fx.timeseries.evaluator import EvalMetrics
 from cop_fx.timeseries.models import ForecastResult
 
 
+class TopicWorkerState(TypedDict):
+    """Payload que viaja en cada `Send` hacia un topic_worker (Etapa 3)."""
+
+    cluster_topic: str
+    cluster_articles: list[Article]
+
+
 class PipelineState(TypedDict, total=False):
     # ── Input ─────────────────────────────────────────────────────────
     run_date: str                   # ISO date string  "2024-06-01"
@@ -26,7 +33,14 @@ class PipelineState(TypedDict, total=False):
     raw_articles: list[Article]
     has_material_news: bool         # veredicto del router (Etapa 2)
     materiality_reason: str
-    analyzed_articles: list[dict[str, Any]]  # enriched with topic/severity
+    headline_tags: list[dict[str, Any]]      # tags gruesos del gate (siembran clusters)
+    clusters: dict[str, list[int]]           # topic → índices en raw_articles
+    # Reducers: N topic_workers (Send) escriben en el mismo paso — operator.add
+    # concatena sus aportes en vez de chocar.
+    worker_analyses: Annotated[list[dict[str, Any]], operator.add]
+    cluster_narratives: Annotated[list[str], operator.add]
+    analyzed_articles: list[dict[str, Any]]  # consolidado por aggregate_signals
+    news_signal: dict[str, Any]              # NewsSignal serializado (para el adjudicador)
     news_summary: str               # LLM-generated summary
 
     # ── Forecast ──────────────────────────────────────────────────────
