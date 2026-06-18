@@ -98,6 +98,45 @@ sirve aunque "se vea más elegante":
 > Regla de oro: **una mejora que no puedas medir contra uno de estos cinco puntos
 > no es una mejora — es una opinión.**
 
+### 2.1 Qué se puede medir (y qué NO) — léelo o medirás humo
+
+Esta es la parte que el repo **todavía no te resuelve**, y entenderla es la mitad
+del proyecto. Antes de prometer "subí el acierto direccional", verifica con qué
+instrumento:
+
+- **`directional_backtest` mide SOLO la pata de serie de tiempo.** Compara
+  `arima` / `momentum` / `always_up`, todas deterministas. **No ejecuta ningún
+  LLM.** Si cambias un prompt del adjudicador o del analista, este número **no se
+  mueve** — no porque tu cambio sea malo, sino porque el backtest ni lo toca. Úsalo
+  como *baseline de la señal de serie*, no como juez de tus prompts.
+- **El acierto direccional del LLM vive en `predictions.db`** (`PredictionStore`),
+  que `record_prediction` llena a razón de **~1 fila por corrida** y auto-califica
+  con `evaluate_pending` al vencer el horizonte. **No existe un harness de
+  backfill/replay**: no puedes recrear 60 días de decisiones del LLM ejecutando un
+  comando. Con el repo tal cual, **no obtendrás una muestra estadísticamente útil
+  del acierto del LLM en el plazo de un curso.**
+
+Tienes dos salidas honestas, y debes declarar cuál tomaste:
+
+  **(a) Métricas-proxy offline** (baratas, viables ya): para cambios de prompt,
+  mide cosas que sí puedes calcular sobre entradas fijas —
+  - precisión/recall del gate sobre un set de titulares etiquetados a mano;
+  - varianza de `severity` al re-correr el analista sobre los **mismos** artículos;
+  - tasa de `neutral` y reparto de `dominant_signal`;
+  - número de contradicciones que hoy **corrige el código** en `adjudicate`
+    (si tu prompt es mejor, el código debería corregir menos);
+  - tokens/llamadas por decisión.
+
+  **(b) Construir el harness de replay** (ver reto B.2.5) — el entregable más
+  valioso del proyecto, porque desbloquea medir TODO lo demás de verdad.
+
+> **Iteración offline sin quemar API keys:** stubbea el LLM con
+> `unittest.mock.patch` como en `tests/unit/test_graph_nodes.py`, y aliméntalo con
+> artículos guardados como *fixtures* que capturaste tú. Ojo: el GOLD store
+> (`data/cnn_articles.db`) guarda la **salida** de la clasificación (`summary` +
+> tópico/severidad), **no** el cuerpo crudo que leyó el analista — para congelar
+> *entradas* tienes que guardarlas tú mismo. Verifícalo antes de confiar en él.
+
 ---
 
 ## 3. Reglas del juego
@@ -146,7 +185,7 @@ forma débil). Para cada una: aplícala, mídela, decide si se queda.
 |---|---|---|
 | **Few-shot / exemplars** | Mostrar 2–3 ejemplos resueltos de entrada→salida | Calibrar `severity` del analista; mostrar un caso `neutral` bien hecho al adjudicador |
 | **Contrastive / negative examples** | Mostrar un ejemplo *malo* y por qué lo es | Enseñar al gate a NO marcar como material el ruido global |
-| **Self-consistency** | Muestrear N veces y votar la dirección modal | Adjudicador en días ambiguos: ¿converge o se contradice? |
+| **Self-consistency** | Muestrear N veces y votar la dirección modal (necesita **temperatura > 0** — choca con el `temperature=0.0` actual; súbela solo en ese nodo) | Adjudicador en días ambiguos: ¿converge o se contradice? |
 | **Reflexión / critique-then-revise** | El modelo evalúa su propia salida y la corrige | Segundo paso sobre el `DirectionalCall` antes de publicar |
 | **Prompt chaining / descomposición** | Partir un prompt grande en pasos más simples | Separar "clasificar relación de señales" de "elegir dirección" |
 | **Rúbrica explícita / scoring** | Pedir que puntúe contra criterios antes de decidir | Que el editor puntúe cada candidata a noticia del día |
@@ -179,10 +218,11 @@ Pistas, no recetas. Elige uno como tu hilo principal:
 
 ### A.3 Cómo medir un prompt (no por intuición)
 
-- **Congela la entrada.** Guarda un conjunto de artículos / señales reales (hay
-  GOLD persistido en SQLite vía `analysis/gold_store.py`) y corre el nodo aislado
-  sobre *los mismos datos* antes y después. Comparar sobre entradas distintas no
-  prueba nada.
+- **Congela la entrada.** Captura un conjunto de artículos / señales reales como
+  *fixtures* propios (recuerda: el GOLD store guarda la *salida*, no el cuerpo de
+  entrada — §2.1) y corre el nodo aislado sobre *los mismos datos* antes y después,
+  stubbeando el LLM con `patch` como en `tests/unit/test_graph_nodes.py`. Comparar
+  sobre entradas distintas no prueba nada.
 - **Define la métrica antes de cambiar el prompt** (ver §2).
 - **Repite la corrida** (temperatura 0 ayuda pero no garantiza determinismo):
   reporta varianza, no un solo número.
@@ -250,6 +290,35 @@ Elige **una** como hilo principal:
    una noticia toca términos de intercambio (petróleo) o el lado dólar. Mide la
    reducción de llamadas/tokens vs la pérdida (o no) de señal.
 
+5. **★ Harness de replay/backfill (reto estrella).** Hoy no puedes medir el
+   acierto del LLM con muestra real (§2.1). Construye un modo que reproduzca el
+   pipeline sobre N fechas históricas: para cada fecha, congela los artículos y
+   la serie de ese día, corre el grafo (con LLM real o stubbeado) y vuelca el
+   `DirectionalCall` a `predictions.db` con su `run_date` correcto; luego
+   `evaluate_pending` lo califica contra la TRM realizada. **Esto desbloquea medir
+   de verdad todo lo demás del proyecto** — por eso es el reto de mayor valor.
+   Pistas: necesitas capturar/almacenar las entradas por fecha (el GOLD store no
+   sirve, guarda salidas); cuida el costo de LLM (empieza con 5–10 fechas);
+   respeta los contratos de estado al inyectar datos congelados.
+
+### B.2.bis — Pydantic: mueve las garantías del prompt al contrato
+
+Tu objetivo es dominar LangGraph **y Pydantic**. Hoy varias garantías viven como
+*texto* en los prompts ("confidence below 0.35 turns neutral", "direction MUST
+match dominant_signal") y el código las re-corrige a mano en `adjudicate`. Reto:
+**llévalas al contrato** en `src/cop_fx/contracts.py`.
+
+- Usa tipos restringidos y `Field(ge=…, le=…)`, `enum`/`Literal`, y
+  `@field_validator` / `@model_validator` para que un veredicto incoherente
+  (p. ej. `dominant_signal=news` con `direction` que no coincide, o `confidence`
+  fuera de rango) **no pueda construirse**, en vez de corregirse después.
+- Mide: ¿cuánta lógica de "fix structural contradictions" del nodo `adjudicate`
+  puedes borrar porque el contrato ya la garantiza? Menos código defensivo a mano
+  = mejora real de robustez y auditabilidad.
+- Cuidado: `with_structured_output` reintenta cuando el modelo viola el esquema —
+  observa si tus validadores nuevos disparan más reintentos (= más costo) y
+  balancéalo.
+
 ### B.3 Reglas duras al tocar el grafo
 
 - **No reintroduzcas `os.chdir()` ni `ROOT = Path.cwd()`.** Las rutas salen de
@@ -305,7 +374,8 @@ uv run cop-fx run
 # Correr con human-in-the-loop (pausa antes de publicar)
 uv run cop-fx run --review
 
-# Backtest direccional — tu principal instrumento de medida.
+# Backtest direccional de la PATA DE SERIE (arima/momentum/always_up).
+# OJO: NO ejecuta el LLM — no mide tus cambios de prompt (ver §2.1).
 # directional_backtest(df, ...) necesita la serie TRM (columnas ds, y).
 uv run python -c "from cop_fx.data.fx_fetcher import FXFetcher; from cop_fx.tracking.backtest import directional_backtest; _, summary = directional_backtest(FXFetcher().fetch()); print(summary)"
 
@@ -319,5 +389,9 @@ uv run streamlit run dashboard/app.py
 > Configuración operativa en `config.yaml` (modelo, caps de noticias, bandas).
 > `.env` es **solo secretos**. Precedencia: env > .env > yaml > defaults.
 
-**Primer paso recomendado:** corre el backtest tal cual está, anota los números,
-y ya tienes tu línea base antes de cambiar nada.
+**Primer paso recomendado (calentamiento offline y medible):** arma un set de
+~20 titulares etiquetados a mano (material / no material), corre `check_materiality`
+sobre ellos stubbeando el resto, y calcula precisión/recall del gate actual. Eso te
+da una línea base **real para un cambio de prompt** sin depender del backtest (que
+solo mide la serie) ni de `predictions.db` (que se llena ~1/día). De ahí, elige tu
+hilo.
