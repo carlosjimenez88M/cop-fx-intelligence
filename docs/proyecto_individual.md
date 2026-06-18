@@ -228,6 +228,20 @@ correlaciona mejor con el movimiento realizado de la TRM que la one-shot? ¿En
 cuántos casos la tool *cambió* la clasificación? Costo: tokens/llamadas extra por
 artículo vs. la ganancia de señal.
 
+**Cómo debería verse** (traza ReAct esperada en el log de un worker):
+
+```
+Thought:  el titular habla de un recorte de producción de la OPEP → posible shock
+          de términos de intercambio para Colombia. Necesito confirmar el Brent.
+Action:   get_series(ticker="brent", ventana="5d")
+Observation: Brent +4.1% en 5 días.
+Thought:  movimiento material y a favor del COP → severidad alta.
+Answer:   {topic: "energy", fx_channel: "terms_of_trade", severity: "high",
+           bullish_cop: true, reasoning: "Brent +4% confirma shock de TI"}
+```
+
+El antes (one-shot) habría puesto `severity: "medium"` adivinando, sin el dato.
+
 ---
 
 ### Pista 2 — Evaluator-optimizer: el adjudicador que se corrige
@@ -264,6 +278,20 @@ con que validadores muy estrictos disparen reintentos de `with_structured_output
 (debe tender a 0 con el lazo); reparto de `dominant_signal` y tasa de `neutral`;
 ¿cuántas vueltas necesita en promedio? Costo de las llamadas extra del crítico.
 
+**Cómo debería verse** — hay una **solución de referencia ejecutable** en
+[`examples/evaluator_optimizer_reference.py`](../examples/evaluator_optimizer_reference.py)
+(córrela con `uv run python -m examples.evaluator_optimizer_reference`). El lazo:
+
+```
+generate  → verdict#1: {direction: up, confidence: 1.4, dominant: none}   ← incoherente
+critique  → reprueba: "confidence fuera de [0,1]; dominant=none exige neutral"
+generate  → verdict#2: {direction: neutral, confidence: 0.3, dominant: none} (usa el feedback)
+critique  → aprueba → END
+```
+
+Si tras `MAX_REVISIONS` sigue incoherente, **se abstiene** (neutral) en vez de
+emitir basura. Tu versión cambia el `critique` determinista por un LLM con rúbrica.
+
 ---
 
 ### Pista 3 — Orchestrator-workers: el orquestador que planea
@@ -295,6 +323,19 @@ debe seguir cuadrando aunque ahora lleguen análisis de personas distintas. El
 **Cómo lo mides.** Sobre clusters congelados: ¿la clasificación del especialista
 coincide mejor con una etiqueta humana que la del worker genérico? En la variante
 debate: ¿sube el acierto/la calidad de la abstención, o solo subió el costo?
+
+**Cómo debería verse** (lo que el orquestador decide y mete en cada `Send`):
+
+```
+cluster "monetary_policy" → Send(topic_worker, {persona: "analista de banca central", ...})
+cluster "energy"          → Send(topic_worker, {persona: "analista de commodities",  ...})
+cluster "fiscal_risk"     → Send(topic_worker, {persona: "analista de crédito soberano", ...})
+# variante debate:
+cluster "energy" → Send(topic_worker, {sesgo: "alcista_cop"}) + Send(topic_worker, {sesgo: "bajista_cop"})
+```
+
+El worker genérico de hoy mete el mismo prompt en los tres; aquí el orquestador
+*planea* quién analiza qué.
 
 ---
 
@@ -349,6 +390,38 @@ Entrega una rama y un documento corto (`docs/experimentos/<tu-nombre>.md`) con:
 5. **Veredicto honesto** — ¿se queda o se descarta? Si no funcionó, por qué crees
    que no.
 6. **Tests** verdes (`uv run pytest`).
+
+**Cómo debería verse un writeup** (ejemplo de la forma y el nivel esperado):
+
+```markdown
+# Experimento — Pista 2 (evaluator-optimizer) — Ana P.
+
+## Hipótesis
+Cerrar el lazo crítico-regenerador en `adjudicate` bajará a ~0 las contradicciones
+que hoy parchea `_build_directional_call`, sin disparar el costo más de 1 vuelta extra.
+
+## Línea base (sistema actual, 12 corridas sobre fechas congeladas)
+| Métrica | Valor |
+|---|---|
+| Contradicciones corregidas por código | 7 / 12 corridas |
+| Llamadas LLM al adjudicador / corrida | 1.0 |
+
+## El cambio
+Nodo `critique` (tier judge, rúbrica de 4 puntos) + arista condicional de vuelta a
+`adjudicate`, `revision_count` en el estado, tope 2. (diff: +48/-9)
+
+## Resultado (mismas 12 fechas)
+| Métrica | Antes | Después |
+|---|---|---|
+| Contradicciones corregidas por código | 7/12 | 1/12 |
+| Llamadas LLM / corrida (media) | 1.0 | 1.6 |
+
+## Veredicto
+Se queda. El lazo hizo el trabajo que el parche hacía a ciegas y dejó el porqué en
+`consistency_notes`. Costo +60% en el adjudicador, aceptable porque es 1 de ~10
+llamadas del pipeline. Lo que NO funcionó: subir el tope a 3 no mejoró nada (rendimientos
+decrecientes) — lo dejé en 2.
+```
 
 ### Rúbrica
 

@@ -424,6 +424,11 @@ def orchestrate(state: PipelineState) -> PipelineState:
     Si hay más de MAX_TOPIC_WORKERS clusters, los más pequeños se funden
     en "other" para acotar el costo del fan-out.
     """
+    # 🎓 PROYECTO — PISTA 3 (orchestrator-workers): hoy este orquestador solo
+    # PARTE los artículos en clusters y todos los workers usan el MISMO prompt.
+    # El reto es que el orquestador PLANEE: asignar una persona/prompt por tipo
+    # de cluster (banca central, commodities, riesgo-país) en el payload del
+    # Send, o lanzar un debate alcista vs bajista. Ver docs/proyecto_individual.md §5.
     articles = state.get("raw_articles", [])
     tags = state.get("headline_tags", [])
 
@@ -479,6 +484,11 @@ def topic_worker(state: TopicWorkerState) -> PipelineState:
     → impacto). Su salida se fusiona al estado global por los reducers de
     worker_analyses / cluster_narratives.
     """
+    # 🎓 PROYECTO — PISTA 1 (ReAct): hoy el analista clasifica de UN SOLO disparo
+    # y ADIVINA la severidad. El reto es darle herramientas deterministas
+    # (get_series sobre Brent/DXY/equity en market_fetcher.py, get_trm en
+    # fx_fetcher.py) y dejar que razone+actúe para ANCLAR la severidad en datos
+    # reales. La tool informa; la serie sigue dando el signo. Ver §5 Pista 1.
     topic = state.get("cluster_topic", "other")
     articles = state.get("cluster_articles", [])
     if not articles:
@@ -1006,6 +1016,12 @@ def adjudicate(state: PipelineState) -> PipelineState:
     DirectionalCall, cuyos validadores acotan la confianza y fuerzan la
     abstención. El LLM juzga; el código gobierna.
     """
+    # 🎓 PROYECTO — PISTA 2 (evaluator-optimizer): hoy esto es UN SOLO disparo y
+    # las contradicciones las corrige el código en _build_directional_call. El
+    # reto es cerrar el lazo: un nodo crítico que puntúe el veredicto contra una
+    # rúbrica y, si reprueba, regenere (con revision_count + recursion_limit).
+    # Solución de referencia trabajada en examples/evaluator_optimizer_reference.py.
+    # Ver docs/proyecto_individual.md §5 Pista 2.
     horizon = state.get("horizon_days", get_settings().forecast_horizon_days)
     raw_news = state.get("news_signal")
     news = (
