@@ -158,7 +158,7 @@ Tabla `predictions` (SQLite local, BigQuery después): cada día guarda el `Dire
 ### Etapa 6 — Persistencia, HITL y memoria (cuando lo anterior funcione)
 **Curso:** `notebooks/06_agent_state/`, `07_agent_memory/`, `12_memory_langgraph/`
 
-`SqliteSaver` como checkpointer, `interrupt` antes de `publish` (tú apruebas el tweet), y memoria entre corridas: "ayer dije `down` con 0.7 y acerté/fallé" entra como contexto del adjudicador de hoy. RAG sobre noticias históricas (`notebooks/10_agentic_rag/`) entra aquí, no antes: solo cuando el adjudicador necesite contexto que el batch del día no trae.
+`SqliteSaver` como checkpointer, `interrupt` antes de finalizar (tú apruebas el veredicto), y memoria entre corridas: "ayer dije `down` con 0.7 y acerté/fallé" entra como contexto del adjudicador de hoy. RAG sobre noticias históricas (`notebooks/10_agentic_rag/`) entra aquí, no antes: solo cuando el adjudicador necesite contexto que el batch del día no trae.
 
 ---
 

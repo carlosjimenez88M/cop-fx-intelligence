@@ -8,9 +8,6 @@
 > *prompting* y de *arquitectura LangGraph*, cómo medir el impacto y la rúbrica.
 > El resto de este README describe el sistema que van a intervenir — léanlo junto
 > con [`docs/arquitectura.md`](docs/arquitectura.md) **antes** de tocar código.
->
-> *(La publicación en X/Twitter está fuera del alcance del ejercicio — ignoren esa
-> sección.)*
 
 ---
 
@@ -28,7 +25,7 @@ Sistema **multiagéntico** (LangGraph) que clasifica la **dirección diaria del 
 4. **Fan-out dinámico (`Send`)**: un agente analista por cluster de tópico descarga el **texto completo** de sus artículos y los clasifica — tópico (15 dominios), canal de transmisión FX, severidad, dirección, entidades.
 5. **Un agente editor** elige LA noticia más importante del día y justifica por qué.
 6. **El adjudicador** reconcilia la señal de noticias contra el signo del forecast (Prophet + ARIMA(2,1,2)) con el contexto de mercado como evidencia → emite el `DirectionalCall` con abogado del diablo obligatorio, `dominant_signal` y checks de coherencia.
-7. **Genera el reporte** Markdown, **registra la predicción** (que se auto-califica contra la TRM real al vencer su horizonte) y opcionalmente publica un tweet con la noticia clave del día.
+7. **Genera el reporte** Markdown y **registra la predicción**, que se auto-califica contra la TRM real al vencer su horizonte.
 
 ---
 
@@ -49,7 +46,7 @@ START ─┬─► fetch_fx ──► run_forecast (señal de la serie, sin LLM)
                             ▼                        ▼                    ▼
                      pick_top_story ──────────► adjudicate (defer=True)
                                                      │
-                                      generate_report → record_prediction → publish → END
+                                      generate_report → record_prediction → human_review (HITL) → END
 ```
 
 ### Patrones agénticos (la respuesta a "¿cuál se usa?": todos, en capas)
@@ -90,7 +87,7 @@ Reglas importantes: español estricto en texto natural, penalización de noticia
 **Dos archivos, responsabilidades separadas** (precedencia: env vars > `.env` > `config.yaml` > defaults):
 
 - [`config.yaml`](config.yaml) — **toda** la configuración operativa: modelos (`gpt-5-mini` para el tier fast / `gpt-5.4-mini` para el tier judge), nº de artículos, feeds, bandas muertas, tope de workers, horizonte...
-- [`.env`](.env.example) — **solo secretos**: `OPENAI_API_KEY` (obligatoria), Alpha Vantage / NewsAPI / Twitter (opcionales).
+- [`.env`](.env.example) — **solo secretos**: `OPENAI_API_KEY` (obligatoria), Alpha Vantage / NewsAPI (opcionales).
 
 Las rutas son absolutas vía `cop_fx.paths` (derivadas del paquete, nunca del cwd) — todo funciona desde cualquier directorio.
 
@@ -105,7 +102,7 @@ git clone <repo> && cd cop-fx-intelligence
 cp .env.example .env       # pon tu OPENAI_API_KEY
 uv sync
 
-uv run cop-fx run                          # pipeline completo (sin tweet)
+uv run cop-fx run                          # pipeline completo
 uv run streamlit run dashboard/app.py     # desk: call, keywords, topics, forecast y aprendizaje
 uv run pytest -m unit                      # tests rápidos sin I/O real
 ```
@@ -136,42 +133,7 @@ entra si afecta Colombia/COP directamente, el tramo USD vía Fed/macro de EE. UU
 petróleo/términos de intercambio, riesgo país o flujos hacia Colombia/EM.
 Macro global interesante pero sin ese puente se degrada a `fx_relevance=none`.
 
-### Publicar en X/Twitter con Tweepy
-
-El pipeline ya construye `tweet_text` con:
-
-- dirección USD/COP;
-- confianza;
-- TRM actual;
-- **noticia clave del día** elegida por `pick_top_story`;
-- hashtags.
-
-Para publicar:
-
-1. Crea una app en el [Developer Portal de X](https://developer.x.com/).
-2. Activa permisos de escritura (`Read and write`) y genera credenciales OAuth 1.0a.
-3. En `.env`, agrega:
-
-```bash
-TWITTER_ENABLED=true
-TWITTER_API_KEY=...
-TWITTER_API_SECRET=...
-TWITTER_ACCESS_TOKEN=...
-TWITTER_ACCESS_TOKEN_SECRET=...
-TWITTER_BEARER_TOKEN=...   # opcional para Tweepy Client, útil mantenerlo
-```
-
-4. Ejecuta:
-
-```bash
-uv run cop-fx run --publish
-```
-
-El nodo `publish` usa Tweepy v4 (`tweepy.Client.create_tweet`) y solo publica cuando **ambas** condiciones son verdaderas: `--publish` en CLI y `TWITTER_ENABLED=true`.
-
----
-
-## Memoria entre corridas y aprobación humana (Etapa 6)
+## Memoria entre corridas y revisión humana (Etapa 6)
 
 El grafo usa las **dos memorias** de LangGraph, cada una con un rol distinto:
 
@@ -185,17 +147,18 @@ El grafo usa las **dos memorias** de LangGraph, cada una con un rol distinto:
 
 - **Memoria de corto plazo + HITL (`interrupt`).** Con `--review`, el grafo se
   compila con un **checkpointer** durable (SQLite) bajo un `thread_id` y se
-  pausa en `human_review` antes de publicar, devolviendo el tweet propuesto.
-  La corrida se reanuda en otro proceso con la decisión humana:
+  pausa en `human_review` antes de finalizar, devolviendo el veredicto del día
+  para que un humano lo acepte o lo rechace. La corrida se reanuda en otro
+  proceso con la decisión humana:
 
 ```bash
-uv run cop-fx run --review --publish          # corre y PAUSA pidiendo aprobación
-uv run cop-fx resume --thread <fecha> --approve   # publica
-uv run cop-fx resume --thread <fecha> --reject    # descarta sin publicar
+uv run cop-fx run --review                        # corre y PAUSA pidiendo revisión
+uv run cop-fx resume --thread <fecha> --approve   # acepta el veredicto
+uv run cop-fx resume --thread <fecha> --reject    # rechaza el veredicto
 ```
 
 El resume no recomputa el LLM: continúa desde el checkpoint (estado restaurado
-de SQLite) y solo ejecuta `human_review → publish`.
+de SQLite) y solo ejecuta `human_review → END`.
 
 ---
 
@@ -229,10 +192,9 @@ src/cop_fx/
 │   ├── models.py            ← Prophet + ARIMA(2,1,2) — orden respaldado por BIC y backtest
 │   ├── diagnostics.py       ← ADF/KPSS, ACF/PACF, grid AIC/BIC, Ljung-Box
 │   └── evaluator.py         ← Walk-forward CV
-├── tracking/
-│   ├── predictions.py       ← Tabla predictions: cada veredicto se auto-califica
-│   └── backtest.py          ← Backtest direccional vs baselines (momentum, always_up)
-└── publishers/twitter.py    ← Tweepy v4
+└── tracking/
+    ├── predictions.py       ← Tabla predictions: cada veredicto se auto-califica
+    └── backtest.py          ← Backtest direccional vs baselines (momentum, always_up)
 
 notebooks/                   ← El laboratorio (cada una ejecutada, con HTML en notebooks/html/)
 ├── 01_noticias.ipynb        ← Bronze→Silver→Gold, taxonomía, grafo de dependencias

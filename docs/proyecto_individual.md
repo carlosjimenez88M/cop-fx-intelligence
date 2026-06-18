@@ -57,13 +57,12 @@ START ─┬─► fetch_fx ──► run_forecast (señal de serie, sin LLM) �
                             ▼                        ▼                   ▼
                     aggregate_signals ───► pick_top_story ──► adjudicate (defer)
                                                                    │
-                                  generate_report → record_prediction → human_review → (fin del ejercicio)
+                                  generate_report → record_prediction → human_review (HITL) → END
 ```
 
-> **Fuera de alcance:** la publicación en redes (el nodo `publish` / Twitter) **no
-> es parte de este proyecto**. No necesitas credenciales de X/Twitter ni vas a
-> publicar nada. Tu producto final es el `DirectionalCall` y el reporte, no un
-> tweet. Si un reto te lleva al final del grafo, detente en el reporte/veredicto.
+> Tu producto final es el `DirectionalCall` y el reporte Markdown. El nodo
+> `human_review` es un punto de control humano (HITL) opcional que pausa para
+> revisar el veredicto antes de cerrar la corrida.
 
 **Dónde vive cada cosa (puntos de entrada al código):**
 
