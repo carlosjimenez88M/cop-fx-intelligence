@@ -55,8 +55,13 @@ START ─┬─► fetch_fx ──► run_forecast (señal de serie, sin LLM) �
                             ▼                        ▼                   ▼
                     aggregate_signals ───► pick_top_story ──► adjudicate (defer)
                                                                    │
-                                  generate_report → record_prediction → human_review → publish → END
+                                  generate_report → record_prediction → human_review → (fin del ejercicio)
 ```
+
+> **Fuera de alcance:** la publicación en redes (el nodo `publish` / Twitter) **no
+> es parte de este proyecto**. No necesitas credenciales de X/Twitter ni vas a
+> publicar nada. Tu producto final es el `DirectionalCall` y el reporte, no un
+> tweet. Si un reto te lleva al final del grafo, detente en el reporte/veredicto.
 
 **Dónde vive cada cosa (puntos de entrada al código):**
 
@@ -186,7 +191,7 @@ forma débil). Para cada una: aplícala, mídela, decide si se queda.
 | **Few-shot / exemplars** | Mostrar 2–3 ejemplos resueltos de entrada→salida | Calibrar `severity` del analista; mostrar un caso `neutral` bien hecho al adjudicador |
 | **Contrastive / negative examples** | Mostrar un ejemplo *malo* y por qué lo es | Enseñar al gate a NO marcar como material el ruido global |
 | **Self-consistency** | Muestrear N veces y votar la dirección modal (necesita **temperatura > 0** — choca con el `temperature=0.0` actual; súbela solo en ese nodo) | Adjudicador en días ambiguos: ¿converge o se contradice? |
-| **Reflexión / critique-then-revise** | El modelo evalúa su propia salida y la corrige | Segundo paso sobre el `DirectionalCall` antes de publicar |
+| **Reflexión / critique-then-revise** | El modelo evalúa su propia salida y la corrige | Segundo paso sobre el `DirectionalCall` antes de cerrar el veredicto |
 | **Prompt chaining / descomposición** | Partir un prompt grande en pasos más simples | Separar "clasificar relación de señales" de "elegir dirección" |
 | **Rúbrica explícita / scoring** | Pedir que puntúe contra criterios antes de decidir | Que el editor puntúe cada candidata a noticia del día |
 | **ReAct (razona+actúa)** | Intercalar razonamiento con consultas a herramientas | Si agregas una tool de datos (ver Parte B) |
@@ -371,7 +376,7 @@ uv sync
 # Correr el pipeline completo (cuidado con el costo de LLM)
 uv run cop-fx run
 
-# Correr con human-in-the-loop (pausa antes de publicar)
+# Correr con human-in-the-loop (pausa en human_review para inspeccionar el veredicto)
 uv run cop-fx run --review
 
 # Backtest direccional de la PATA DE SERIE (arima/momentum/always_up).

@@ -1,5 +1,19 @@
 # cop-fx-intelligence
 
+> ## 🎓 Estás en la rama del proyecto de curso (`feature/task_course`)
+>
+> **Estudiantes: empiecen aquí → [`docs/proyecto_individual.md`](docs/proyecto_individual.md)**
+>
+> Ese documento es la consigna del **proyecto individual**: qué hacer, los retos de
+> *prompting* y de *arquitectura LangGraph*, cómo medir el impacto y la rúbrica.
+> El resto de este README describe el sistema que van a intervenir — léanlo junto
+> con [`docs/arquitectura.md`](docs/arquitectura.md) **antes** de tocar código.
+>
+> *(La publicación en X/Twitter está fuera del alcance del ejercicio — ignoren esa
+> sección.)*
+
+---
+
 Sistema **multiagéntico** (LangGraph) que clasifica la **dirección diaria del USD/COP** — `down` / `up` / `neutral`, no la magnitud — cruzando noticias analizadas por agentes con la señal de la serie de tiempo, bajo una capa de racionalidad que obliga al contra-argumento y **acota la confianza por contrato Pydantic**.
 
 > La abstención (`neutral`) es una capacidad, no una falla: cuando las señales no concluyen, el sistema lo dice.
