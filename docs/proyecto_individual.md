@@ -27,10 +27,10 @@ caras del mismo patrón.
 
 Trabaja en este orden, igual para las tres pistas:
 
-1. **Diagnostica** (§4): lee los prompts y la topología; nombra lo que ya existe.
+1. **Diagnostica** (sección 4): lee los prompts y la topología; nombra lo que ya existe.
 2. **Hipótesis:** escribe, *antes* de tocar código, "creo que este patrón mejorará
    la métrica Y porque Z".
-3. **Línea base:** mide el sistema actual con la infraestructura del repo (§2.1, §6).
+3. **Línea base:** mide el sistema actual con la infraestructura del repo (sección 2.1, sección 6).
 4. **Implementa** tu patrón en una rama.
 5. **Vuelve a medir** y compara contra tu línea base.
 6. **Documenta** qué pasó — incluido lo que *no* funcionó.
@@ -92,7 +92,7 @@ sirve aunque "se vea más elegante":
 
 1. **Acierto direccional** — ¿el sistema acierta `up`/`down` más seguido que un
    baseline tonto (momentum, always_up)? (Ojo: `directional_backtest` solo mide la
-   *serie*; medir el acierto del **LLM** es harina aparte — ver §2.1.)
+   *serie*; medir el acierto del **LLM** es harina aparte — ver sección 2.1.)
 2. **Calidad de la abstención** — `neutral` debe aparecer cuando las señales no
    concluyen, **no** como escape fácil. Un sistema que dice `neutral` siempre
    tiene 0 errores y 0 valor.
@@ -126,7 +126,7 @@ instrumento:
 
 Por eso, para medir tu patrón usarás sobre todo **métricas-proxy offline** sobre
 entradas congeladas (ver la sección "Cómo lo mides" de tu pista) — y, si tienes
-tiempo, el **harness de replay** (§6) que desbloquea la medición de acierto real.
+tiempo, el **harness de replay** (sección 6) que desbloquea la medición de acierto real.
 
 > **Iteración offline sin quemar API keys:** stubbea el LLM con
 > `unittest.mock.patch` como en `tests/unit/test_graph_nodes.py`, y aliméntalo con
@@ -265,7 +265,7 @@ roles** (generador vs evaluador) y una rúbrica de evaluación escrita, no impl�
 razonamiento **auditable (#4)** y mejora la **calidad de la abstención (#2)**.
 
 **Trampas de LangGraph.** Estás metiendo un **ciclo** y tocando el nodo con
-`defer=True`: relee la trampa de §4.2 y añade un test que cuente ejecuciones.
+`defer=True`: relee la trampa de sección 4.2 y añade un test que cuente ejecuciones.
 Lleva `revision_count` en el estado y pon `recursion_limit` para no hacer bucle
 infinito. **Táctica complementaria (Pydantic):** parte de esas garantías pueden
 migrar del prompt al **contrato** en `contracts.py` — `Field(ge=…, le=…)`,
@@ -341,7 +341,7 @@ El worker genérico de hoy mete el mismo prompt en los tres; aquí el orquestado
 
 ## 6. Infraestructura de medición compartida (opcional, alto valor)
 
-Las tres pistas chocan con lo mismo: §2.1 dice que **no puedes medir el acierto
+Las tres pistas chocan con lo mismo: sección 2.1 dice que **no puedes medir el acierto
 real del LLM** con el repo tal cual. Si quieres ir más allá de las métricas-proxy,
 el entregable de mayor palanca es un **harness de replay/backfill**:
 
@@ -427,9 +427,9 @@ decrecientes) — lo dejé en 2.
 
 | Criterio | Peso |
 |---|---|
-| Diagnóstico correcto de lo que ya existe (§4) | 20% |
+| Diagnóstico correcto de lo que ya existe (sección 4) | 20% |
 | Patrón implementado correctamente y completo (no a medias) | 25% |
-| Medición rigurosa contra la intención (§2), no por intuición | 30% |
+| Medición rigurosa contra la intención (sección 2), no por intuición | 30% |
 | Respeto a las reglas duras (serialización, `defer`/ciclos, fail-soft, rutas) | 15% |
 | Honestidad intelectual (documentar lo que no funcionó) | 10% |
 
@@ -448,7 +448,7 @@ uv run cop-fx run
 uv run cop-fx run --review
 
 # Backtest direccional de la PATA DE SERIE (arima/momentum/always_up).
-# OJO: NO ejecuta el LLM — no mide tu patrón agéntico (ver §2.1).
+# OJO: NO ejecuta el LLM — no mide tu patrón agéntico (ver sección 2.1).
 uv run python -c "from cop_fx.data.fx_fetcher import FXFetcher; from cop_fx.tracking.backtest import directional_backtest; _, summary = directional_backtest(FXFetcher().fetch()); print(summary)"
 
 # Tests
