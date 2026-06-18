@@ -1,4 +1,4 @@
-# Proyecto individual — Razonamiento multiagéntico para la dirección del USD/COP
+# Proyecto individual — Patrones agénticos para la dirección del USD/COP
 
 > **Modalidad:** individual y auto-dirigido. Este documento te da el mapa, los
 > retos y las pistas; **no** te da las soluciones. El objetivo no es "que corra",
@@ -12,24 +12,26 @@
 
 ## 0. Cómo usar este documento
 
-El proyecto tiene dos frentes que se refuerzan entre sí:
+El eje del proyecto es **un patrón agéntico**. El sistema ya tiene varios patrones
+en su forma de *un solo paso* — sin lazos, sin herramientas, sin planeación. Tu
+trabajo es tomar **una** de estas tres pistas y llevarla a su forma completa:
 
-- **Parte A — Prompting:** cómo le hablas a los modelos para que el sistema cumpla
-  mejor su intención.
-- **Parte B — Arquitectura LangGraph:** cómo cableas los nodos para que el
-  razonamiento sea más robusto, barato o auditable.
+- **Pista 1 — ReAct:** el analista de noticias razona *y actúa* consultando datos.
+- **Pista 2 — Evaluator-optimizer:** el adjudicador se critica y se corrige en un lazo.
+- **Pista 3 — Orchestrator-workers:** el orquestador *planea* analistas especializados.
 
-No tienes que hacer todo. Tienes que **elegir un hilo, llevarlo hasta el final y
-demostrar con números que mejoraste algo**. Un cambio pequeño bien medido vale
-más que diez cambios sin evidencia.
+**Eliges UNA y la haces a fondo.** Un patrón implementado, medido y defendido vale
+más que tres a medias. Cada pista combina una *técnica de prompting* (cómo le
+hablas al modelo) con un *cableado de LangGraph* (cómo conectas los nodos): las dos
+caras del mismo patrón.
 
-Trabaja en este orden:
+Trabaja en este orden, igual para las tres pistas:
 
-1. **Diagnostica** (Parte A.0 y B.0): lee el código y nombra lo que ya existe.
-2. **Elige** uno o dos retos (de A y/o B) y escribe tu hipótesis *antes* de tocar
-   código: "creo que X mejorará la métrica Y porque Z".
-3. **Mide la línea base** con la infraestructura que ya está en el repo.
-4. **Implementa** tu cambio en una rama.
+1. **Diagnostica** (§4): lee los prompts y la topología; nombra lo que ya existe.
+2. **Hipótesis:** escribe, *antes* de tocar código, "creo que este patrón mejorará
+   la métrica Y porque Z".
+3. **Línea base:** mide el sistema actual con la infraestructura del repo (§2.1, §6).
+4. **Implementa** tu patrón en una rama.
 5. **Vuelve a medir** y compara contra tu línea base.
 6. **Documenta** qué pasó — incluido lo que *no* funcionó.
 
@@ -72,10 +74,11 @@ START ─┬─► fetch_fx ──► run_forecast (señal de serie, sin LLM) �
 | Estado compartido (`PipelineState`) | `src/cop_fx/agents/state.py` |
 | Prompt del analista de noticias | `src/cop_fx/analysis/news_analyzer.py` |
 | Contratos Pydantic (salida estructurada) | `src/cop_fx/contracts.py` |
+| Series de mercado (Brent/DXY/equity) | `src/cop_fx/data/market_fetcher.py` |
+| Serie TRM | `src/cop_fx/data/fx_fetcher.py` |
 | Memoria / track-record | `src/cop_fx/agents/memory.py` |
-| Checkpointer + Store | `src/cop_fx/agents/persistence.py` |
 | Registro y auto-evaluación de predicciones | `src/cop_fx/tracking/predictions.py` |
-| Backtesting direccional | `src/cop_fx/tracking/backtest.py` |
+| Backtesting direccional (solo serie) | `src/cop_fx/tracking/backtest.py` |
 
 Los prompts ya están en el código como constantes: `_MATERIALITY_PROMPT`,
 `_TOP_STORY_PROMPT`, `_ADJUDICATOR_PROMPT` (en `nodes.py`) y `_PROMPT_TEMPLATE`
@@ -89,7 +92,8 @@ Todo cambio se juzga contra estos objetivos. Si tu cambio no mueve ninguno, no
 sirve aunque "se vea más elegante":
 
 1. **Acierto direccional** — ¿el sistema acierta `up`/`down` más seguido que un
-   baseline tonto (momentum, always_up)? Mídelo con `directional_backtest`.
+   baseline tonto (momentum, always_up)? (Ojo: `directional_backtest` solo mide la
+   *serie*; medir el acierto del **LLM** es harina aparte — ver §2.1.)
 2. **Calidad de la abstención** — `neutral` debe aparecer cuando las señales no
    concluyen, **no** como escape fácil. Un sistema que dice `neutral` siempre
    tiene 0 errores y 0 valor.
@@ -111,9 +115,9 @@ instrumento:
 
 - **`directional_backtest` mide SOLO la pata de serie de tiempo.** Compara
   `arima` / `momentum` / `always_up`, todas deterministas. **No ejecuta ningún
-  LLM.** Si cambias un prompt del adjudicador o del analista, este número **no se
+  LLM.** Si cambias un prompt o agregas un patrón agéntico, este número **no se
   mueve** — no porque tu cambio sea malo, sino porque el backtest ni lo toca. Úsalo
-  como *baseline de la señal de serie*, no como juez de tus prompts.
+  como *baseline de la señal de serie*, no como juez de tu patrón.
 - **El acierto direccional del LLM vive en `predictions.db`** (`PredictionStore`),
   que `record_prediction` llena a razón de **~1 fila por corrida** y auto-califica
   con `evaluate_pending` al vencer el horizonte. **No existe un harness de
@@ -121,19 +125,9 @@ instrumento:
   comando. Con el repo tal cual, **no obtendrás una muestra estadísticamente útil
   del acierto del LLM en el plazo de un curso.**
 
-Tienes dos salidas honestas, y debes declarar cuál tomaste:
-
-  **(a) Métricas-proxy offline** (baratas, viables ya): para cambios de prompt,
-  mide cosas que sí puedes calcular sobre entradas fijas —
-  - precisión/recall del gate sobre un set de titulares etiquetados a mano;
-  - varianza de `severity` al re-correr el analista sobre los **mismos** artículos;
-  - tasa de `neutral` y reparto de `dominant_signal`;
-  - número de contradicciones que hoy **corrige el código** en `adjudicate`
-    (si tu prompt es mejor, el código debería corregir menos);
-  - tokens/llamadas por decisión.
-
-  **(b) Construir el harness de replay** (ver reto B.2.5) — el entregable más
-  valioso del proyecto, porque desbloquea medir TODO lo demás de verdad.
+Por eso, para medir tu patrón usarás sobre todo **métricas-proxy offline** sobre
+entradas congeladas (ver la sección "Cómo lo mides" de tu pista) — y, si tienes
+tiempo, el **harness de replay** (§6) que desbloquea la medición de acierto real.
 
 > **Iteración offline sin quemar API keys:** stubbea el LLM con
 > `unittest.mock.patch` como en `tests/unit/test_graph_nodes.py`, y aliméntalo con
@@ -146,107 +140,44 @@ Tienes dos salidas honestas, y debes declarar cuál tomaste:
 
 ## 3. Reglas del juego
 
-- **Una rama por experimento.** Nombra claro: `exp/few-shot-adjudicator`,
-  `exp/reflection-loop`. No mezcles prompting y arquitectura en el mismo commit.
+- **Una rama por experimento.** Nombra claro: `exp/react-worker`,
+  `exp/evaluator-loop`, `exp/orchestrator-personas`.
 - **Sé crítico con el data flow antes de declarar algo terminado.** Verifica
   *qué texto* le llega realmente al LLM (no asumas que el cuerpo del artículo
   llegó completo). Mira el log y la salida estructurada, no solo el reporte final.
 - **El LLM produce dirección + razonamiento; la serie produce el signo.** No
-  difumines esta frontera: si tu cambio deja que el LLM invente el signo de la
-  tendencia o un precio, lo rompiste.
-- **Cuida el costo de LLM.** Antes de correr el pipeline entero, estima cuántas
-  llamadas hará. Prefiere iterar sobre un nodo aislado con datos guardados.
+  difumines esta frontera: si tu patrón deja que el LLM invente el signo de la
+  tendencia o un precio, lo rompiste. (Aplica con fuerza a la Pista 1: una tool
+  puede *informar* la severidad, pero la serie sigue dando el signo.)
+- **Cuida el costo de LLM.** Los lazos (Pista 2) y el fan-out doble (Pista 3)
+  multiplican llamadas. Estima antes de correr; itera sobre un nodo aislado.
 - **Documenta lo que no funcionó.** Un experimento con resultado negativo bien
   argumentado es un entregable válido (el repo ya tiene dos lecciones de
   overfitting documentadas; sigue esa cultura).
 
 ---
 
-## Parte A — Estrategias de prompting
+## 4. Diagnóstico común (hazlo antes de elegir pista)
 
-### A.0 Diagnóstico (hazlo antes de escribir un solo prompt)
+### 4.1 Lee los prompts y nombra las técnicas que YA usan
 
-Lee los cuatro prompts del sistema y construye una tabla: para cada prompt, ¿qué
-**técnicas de prompting** ya usa? Vas a encontrar varias. Identifícalas por
-nombre. Pistas de lo que hay (no es lista exhaustiva — busca tú):
+Construye una tabla: para cada uno de los cuatro prompts, ¿qué técnicas de
+prompting ya emplea? Pistas de lo que hay (no es exhaustivo — busca tú):
 
 - **Role prompting** ("You are the independent chair of a Colombian FX committee…").
 - **Chain-of-thought estructurado** ("Rules of reasoning — in this order: 1…2…").
 - **Prompting adversarial / self-critique** (el `devils_advocate` obligatorio).
-- **Salida estructurada por contrato** (`with_structured_output` + Pydantic) — el
-  LLM no puede salirse del esquema.
+- **Salida estructurada por contrato** (`with_structured_output` + Pydantic).
 - **Reglas de calibración** (caps de confianza, cuándo `neutral`).
-- **Constraints de idioma y de "no inventes"** ("Do not make claims not in the
-  provided signals").
+- **Constraints de idioma y de "no inventes"**.
 
 > Si no puedes nombrar la técnica que ya existe, no vas a saber qué le falta.
 
-### A.1 Catálogo de técnicas para aplicar
-
-Elige y aplica **al menos dos** de estas que el sistema todavía NO usa (o usa de
-forma débil). Para cada una: aplícala, mídela, decide si se queda.
-
-| Técnica | Idea en una línea | Dónde podría brillar aquí |
-|---|---|---|
-| **Few-shot / exemplars** | Mostrar 2–3 ejemplos resueltos de entrada→salida | Calibrar `severity` del analista; mostrar un caso `neutral` bien hecho al adjudicador |
-| **Contrastive / negative examples** | Mostrar un ejemplo *malo* y por qué lo es | Enseñar al gate a NO marcar como material el ruido global |
-| **Self-consistency** | Muestrear N veces y votar la dirección modal (necesita **temperatura > 0** — choca con el `temperature=0.0` actual; súbela solo en ese nodo) | Adjudicador en días ambiguos: ¿converge o se contradice? |
-| **Reflexión / critique-then-revise** | El modelo evalúa su propia salida y la corrige | Segundo paso sobre el `DirectionalCall` antes de cerrar el veredicto |
-| **Prompt chaining / descomposición** | Partir un prompt grande en pasos más simples | Separar "clasificar relación de señales" de "elegir dirección" |
-| **Rúbrica explícita / scoring** | Pedir que puntúe contra criterios antes de decidir | Que el editor puntúe cada candidata a noticia del día |
-| **ReAct (razona+actúa)** | Intercalar razonamiento con consultas a herramientas | Si agregas una tool de datos (ver Parte B) |
-| **Output forzado de incertidumbre** | Pedir confianza calibrada + qué evidencia la cambiaría | Reforzar la abstención como capacidad |
-
-### A.2 Retos concretos de prompting
-
-Pistas, no recetas. Elige uno como tu hilo principal:
-
-1. **El gate barato sobre-filtra o sub-filtra.** `_MATERIALITY_PROMPT` decide con
-   solo titulares. Construye un set de ~20 titulares etiquetados a mano
-   (material / no material) y mide precisión/recall del gate *actual*. Luego
-   intenta mejorarlo con few-shot + ejemplos contrastivos. ¿Subió el recall sin
-   inundar de falsos positivos (= más costo aguas abajo)?
-
-2. **La calibración de `severity` del analista es subjetiva.** En
-   `news_analyzer.py`, las reglas de `high/medium/low` son texto. Dale ejemplos
-   anclados (anchored examples) de cada nivel. Mide: ¿bajó la varianza de
-   `severity` entre corridas sobre los mismos artículos?
-
-3. **El adjudicador a veces debería abstenerse y no lo hace (o al revés).**
-   Diseña un prompt que pida *primero* listar qué evidencia faltaría para estar
-   seguro, y solo entonces decidir. Compara la tasa de `neutral` y el acierto
-   direccional condicionado a no-neutral.
-
-4. **El editor (`pick_top_story`) elige por intuición.** Conviértelo en una
-   rúbrica: que puntúe cada candidata en frescura, especificidad y relevancia FX
-   antes de elegir el índice. ¿Coincide mejor con lo que un humano elegiría?
-
-### A.3 Cómo medir un prompt (no por intuición)
-
-- **Congela la entrada.** Captura un conjunto de artículos / señales reales como
-  *fixtures* propios (recuerda: el GOLD store guarda la *salida*, no el cuerpo de
-  entrada — §2.1) y corre el nodo aislado sobre *los mismos datos* antes y después,
-  stubbeando el LLM con `patch` como en `tests/unit/test_graph_nodes.py`. Comparar
-  sobre entradas distintas no prueba nada.
-- **Define la métrica antes de cambiar el prompt** (ver §2).
-- **Repite la corrida** (temperatura 0 ayuda pero no garantiza determinismo):
-  reporta varianza, no un solo número.
-- **Mira la salida estructurada cruda**, no solo el reporte: ¿el `consistency_notes`
-  realmente nombra la señal dominante? ¿el `devils_advocate` es de verdad el
-  contra-argumento más fuerte o es de relleno?
-
----
-
-## Parte B — Arquitectura LangGraph
-
-### B.0 Diagnóstico de la topología actual
-
-Antes de añadir nodos, entiende por qué el grafo está así. Responde por escrito:
+### 4.2 Lee la topología y responde por escrito
 
 - ¿Por qué `fetch_market` y `load_memory` **no tienen arista de salida** hacia el
-  adjudicador? (Pista: tiene que ver con `defer=True` y el conteo de *triggers*.)
-- ¿Por qué el fan-out usa `Send` y no un `for` dentro de un nodo? (Pista: la
-  cantidad de workers cambia cada día.)
+  adjudicador? (Pista: `defer=True` y el conteo de *triggers*.)
+- ¿Por qué el fan-out usa `Send` y no un `for` dentro de un nodo?
 - ¿Por qué los reducers de `worker_analyses` y `errors` usan `operator.add`?
 - ¿Qué nodos llaman a un LLM y cuáles son **deterministas a propósito**?
   (`compute_ts_signal`, `aggregate_signals` lo son — entiende por qué.)
@@ -254,103 +185,168 @@ Antes de añadir nodos, entiende por qué el grafo está así. Responde por escr
 > **Trampa documentada en este repo:** `defer=True` NO retiene cuando lo único
 > pendiente son tasks de `Send`, y un nodo deferred con 2+ triggers entrantes se
 > ejecuta **una vez por trigger**. La solución usada aquí es *un solo trigger
-> entrante* al adjudicador. Si tu cambio agrega una arista hacia `adjudicate`,
-> escribe un test que cuente cuántas veces se ejecuta.
+> entrante* al adjudicador. Si tu patrón agrega una arista hacia `adjudicate`,
+> escribe un test que cuente cuántas veces se ejecuta. (Crítico para la Pista 2.)
 
-### B.1 Catálogo de mejoras arquitectónicas
+---
 
-Elige **una** como hilo principal:
+## 5. Las tres pistas — elige UNA
 
-| Patrón LangGraph | Qué te da | Pista de dónde aplicarlo |
-|---|---|---|
-| **Reflection loop** (ciclo con arista de regreso) | El adjudicador critica y reintenta su veredicto | Nodo `critique` entre `adjudicate` y `generate_report`; arista condicional de regreso si no pasa un check |
-| **Retry / fallback con arista condicional** | Robustez ante fallos de LLM o de datos | Hoy el fallback es código dentro del nodo; vuélvelo explícito en el grafo |
-| **Subgrafo** | Encapsular la rama de noticias como grafo reusable | Compila `fetch_news…aggregate_signals` como subgrafo con su propio estado |
-| **Evaluador-como-nodo** | Un nodo que califica la salida y enruta | Tras `record_prediction`, un nodo que decide si re-correr con más fuentes |
-| **Streaming de progreso** | UX y debugging | Usa `stream_mode` para emitir avance por nodo al dashboard |
-| **Multi-agente en debate** | Dos analistas con sesgo opuesto (alcista/bajista) | Reemplaza/duplica `topic_worker` y deja que el adjudicador concilie el debate |
-| **Tool calling (ReAct)** | El analista consulta una serie numérica bajo demanda | Expón Brent/DXY como tool y deja que el worker la pida cuando la noticia lo amerite |
-| **Caché de nodos** | No re-analizar artículos ya vistos | Clave por hash de contenido contra el GOLD store |
+Cada pista tiene la misma estructura: **dónde vive hoy → qué construir → la técnica
+de prompting que lo sostiene → trampas de LangGraph → cómo lo mides**.
 
-### B.2 Retos concretos de arquitectura
+### Pista 1 — ReAct: el analista que razona y actúa
 
-1. **Ciclo de reflexión sobre el veredicto.** Añade un nodo `critique_verdict`
-   que reciba el `DirectionalCall` y verifique las reglas de coherencia *con otro
-   modelo o prompt*. Si falla, arista condicional de regreso a `adjudicate` (con
-   un contador para no hacer bucle infinito — pista: lleva `revision_count` en el
-   estado). Mide: ¿bajaron las contradicciones que hoy corrige el código a mano?
+**Dónde vive hoy.** El `topic_worker` (`nodes.py`) y el `NewsAnalyzer` reciben el
+texto del artículo y clasifican de **un solo disparo**. La `severity` (high/medium/
+low) la *adivina* el modelo: no consulta ningún dato para confirmarla.
 
-2. **La rama de noticias como subgrafo.** Extrae `fetch_news → check_materiality
-   → orchestrate → topic_worker → aggregate_signals` a un subgrafo compilado.
-   Beneficio a demostrar: lo puedes testear y correr aislado. Cuidado con el
-   estado: define el contrato de entrada/salida del subgrafo.
+**Qué construir.** Dale al analista **herramientas deterministas** y deja que
+razone+actúe en un lazo ReAct:
+- `get_series(ticker, ventana)` sobre Brent / DXY / equity (ya existen en
+  `market_fetcher.py`), `get_trm(rango)` (de `fx_fetcher.py`), o
+  `prior_coverage(titular)` (¿esto ya se reportó? penaliza reciclado).
+- El analista decide cuándo llamarlas: *"el titular dice shock petrolero → llamo
+  `get_series('brent') → observo +4% → canal terms_of_trade, severidad alta"*.
 
-3. **Debate alcista vs bajista.** Por cada cluster, lanza DOS workers con system
-   prompts opuestos (uno busca el caso COP-fuerte, otro el COP-débil). El
-   adjudicador concilia. Usa `Send` para el fan-out doble. Mide si el acierto
-   sube o si solo subió el costo.
+**Técnica de prompting.** ReAct (ciclo Thought → Action → Observation), buenas
+*descripciones de tools*, y opcionalmente un *few-shot* de una trayectoria de
+herramienta bien hecha. En LangGraph puedes armar el lazo a mano o con un
+sub-grafo ReAct prebuilt; el worker pasa de ser un nodo a ser un mini-agente.
 
-4. **Tool calling para series bajo demanda.** Hoy `fetch_market` trae todo
-   siempre. Conviértelo en una herramienta que el analista invoque solo cuando
-   una noticia toca términos de intercambio (petróleo) o el lado dólar. Mide la
-   reducción de llamadas/tokens vs la pérdida (o no) de señal.
+**Por qué importa (intención).** Ataca de frente la **alucinación (#3)**: la
+severidad deja de ser opinión y se ancla en un número real. De rebote mejora el
+**acierto (#1)**.
 
-5. **★ Harness de replay/backfill (reto estrella).** Hoy no puedes medir el
-   acierto del LLM con muestra real (§2.1). Construye un modo que reproduzca el
-   pipeline sobre N fechas históricas: para cada fecha, congela los artículos y
-   la serie de ese día, corre el grafo (con LLM real o stubbeado) y vuelca el
-   `DirectionalCall` a `predictions.db` con su `run_date` correcto; luego
-   `evaluate_pending` lo califica contra la TRM realizada. **Esto desbloquea medir
-   de verdad todo lo demás del proyecto** — por eso es el reto de mayor valor.
-   Pistas: necesitas capturar/almacenar las entradas por fecha (el GOLD store no
-   sirve, guarda salidas); cuida el costo de LLM (empieza con 5–10 fechas);
-   respeta los contratos de estado al inyectar datos congelados.
+**Trampas de LangGraph.** El lazo de tools **multiplica llamadas** → pon
+`recursion_limit` y un tope de pasos explícito. Envuelve los fetchers como tools
+sin romper el fail-soft (una tool que falla no debe tumbar al worker). Respeta el
+payload del `Send`. Y la regla dura: la tool *informa*, **no** fija el signo de la
+tendencia (eso sigue siendo de la serie).
 
-### B.2.bis — Pydantic: mueve las garantías del prompt al contrato
+**Cómo lo mides.** Sobre un set congelado de artículos: ¿la `severity` con ReAct
+correlaciona mejor con el movimiento realizado de la TRM que la one-shot? ¿En
+cuántos casos la tool *cambió* la clasificación? Costo: tokens/llamadas extra por
+artículo vs. la ganancia de señal.
 
-Tu objetivo es dominar LangGraph **y Pydantic**. Hoy varias garantías viven como
-*texto* en los prompts ("confidence below 0.35 turns neutral", "direction MUST
-match dominant_signal") y el código las re-corrige a mano en `adjudicate`. Reto:
-**llévalas al contrato** en `src/cop_fx/contracts.py`.
+---
 
-- Usa tipos restringidos y `Field(ge=…, le=…)`, `enum`/`Literal`, y
-  `@field_validator` / `@model_validator` para que un veredicto incoherente
-  (p. ej. `dominant_signal=news` con `direction` que no coincide, o `confidence`
-  fuera de rango) **no pueda construirse**, en vez de corregirse después.
-- Mide: ¿cuánta lógica de "fix structural contradictions" del nodo `adjudicate`
-  puedes borrar porque el contrato ya la garantiza? Menos código defensivo a mano
-  = mejora real de robustez y auditabilidad.
-- Cuidado: `with_structured_output` reintenta cuando el modelo viola el esquema —
-  observa si tus validadores nuevos disparan más reintentos (= más costo) y
-  balancéalo.
+### Pista 2 — Evaluator-optimizer: el adjudicador que se corrige
 
-### B.3 Reglas duras al tocar el grafo
+**Dónde vive hoy.** `adjudicate` (`nodes.py`) es **un solo disparo**. Las
+incoherencias (dirección que no coincide con `dominant_signal`, confianza fuera de
+banda) las arregla **código a posteriori** (`_build_directional_call` / "fix
+structural contradictions"). Es un parche, no un razonamiento.
+
+**Qué construir.** El lazo completo del patrón: **generador → evaluador →
+(regenera si reprueba)**. Un nodo `critique` (otro prompt, idealmente otro tier de
+modelo) puntúa el `AdjudicatorVerdict` contra una **rúbrica explícita**: ¿la
+dirección coincide con la señal dominante? ¿el abogado del diablo es de verdad
+fuerte o de relleno? ¿la confianza está calibrada a la divergencia? Si reprueba,
+devuelve la crítica al generador y se regenera, hasta N vueltas.
+
+**Técnica de prompting.** Reflexión / critique-then-revise, con **separación de
+roles** (generador vs evaluador) y una rúbrica de evaluación escrita, no implícita.
+
+**Por qué importa (intención).** Mueve la lógica frágil del código a un
+razonamiento **auditable (#4)** y mejora la **calidad de la abstención (#2)**.
+
+**Trampas de LangGraph.** Estás metiendo un **ciclo** y tocando el nodo con
+`defer=True`: relee la trampa de §4.2 y añade un test que cuente ejecuciones.
+Lleva `revision_count` en el estado y pon `recursion_limit` para no hacer bucle
+infinito. **Táctica complementaria (Pydantic):** parte de esas garantías pueden
+migrar del prompt al **contrato** en `contracts.py` — `Field(ge=…, le=…)`,
+`Literal`, `@model_validator` — para que un veredicto incoherente **no pueda
+construirse**. Mide cuánto código de "fix contradictions" puedes borrar; cuidado
+con que validadores muy estrictos disparen reintentos de `with_structured_output`
+(= más costo).
+
+**Cómo lo mides.** Número de contradicciones que el código *tenía* que corregir
+(debe tender a 0 con el lazo); reparto de `dominant_signal` y tasa de `neutral`;
+¿cuántas vueltas necesita en promedio? Costo de las llamadas extra del crítico.
+
+---
+
+### Pista 3 — Orchestrator-workers: el orquestador que planea
+
+**Dónde vive hoy.** `orchestrate` → `topic_worker × N` vía `Send`
+(`fan_out_clusters` en `nodes.py`). El orquestador solo **parte** los artículos en
+clusters; **todos los workers usan el mismo prompt**. No hay especialización.
+
+**Qué construir** (elige una variante):
+- **Personas por cluster:** el orquestador decide la *persona* del worker según el
+  tipo de cluster — un cluster de política monetaria recibe analista de banca
+  central; uno de petróleo, analista de commodities; uno de riesgo fiscal, analista
+  de crédito soberano. El payload del `Send` lleva la persona/prompt.
+- **Debate alcista vs bajista:** por cada cluster, lanza DOS workers con system
+  prompts opuestos (uno construye el caso COP-fuerte, otro el COP-débil) y el
+  adjudicador concilia el debate.
+
+**Técnica de prompting.** Role/persona prompting especializado y *templating*
+dinámico del prompt; en la variante debate, prompting adversarial estructurado.
+
+**Por qué importa (intención).** Mejora la **calidad de la clasificación (#1)** —
+un especialista nombra mejor el canal de transmisión — y la **auditabilidad (#4)**.
+
+**Trampas de LangGraph.** Sigue siendo `Send` dinámico: respeta los reducers
+`operator.add` y el tope `MAX_TOPIC_WORKERS`. El `aggregate_signals` determinista
+debe seguir cuadrando aunque ahora lleguen análisis de personas distintas. El
+**debate duplica el costo** — esa es justo la pregunta a responder con datos.
+
+**Cómo lo mides.** Sobre clusters congelados: ¿la clasificación del especialista
+coincide mejor con una etiqueta humana que la del worker genérico? En la variante
+debate: ¿sube el acierto/la calidad de la abstención, o solo subió el costo?
+
+---
+
+## 6. Infraestructura de medición compartida (opcional, alto valor)
+
+Las tres pistas chocan con lo mismo: §2.1 dice que **no puedes medir el acierto
+real del LLM** con el repo tal cual. Si quieres ir más allá de las métricas-proxy,
+el entregable de mayor palanca es un **harness de replay/backfill**:
+
+> Construye un modo que reproduzca el pipeline sobre N fechas históricas: para
+> cada fecha, congela los artículos y la serie de ese día, corre el grafo (LLM
+> real o stubbeado) y vuelca el `DirectionalCall` a `predictions.db` con su
+> `run_date` correcto; luego `evaluate_pending` lo califica contra la TRM
+> realizada. Esto **desbloquea medir de verdad** el efecto de tu patrón sobre el
+> acierto direccional. Pistas: captura/almacena las entradas por fecha (el GOLD
+> store no sirve, guarda salidas); empieza con 5–10 fechas por costo; respeta los
+> contratos de estado al inyectar datos congelados.
+
+No es obligatorio construirlo, pero si lo haces, conviértelo en parte central de
+tu medición — y reconócelo como el habilitador que es.
+
+---
+
+## 7. Reglas duras al tocar el grafo
 
 - **No reintroduzcas `os.chdir()` ni `ROOT = Path.cwd()`.** Las rutas salen de
   `cop_fx.paths` (derivado de `__file__`). Está marcado como mala práctica.
 - **Serialización del estado:** el estado lleva DataFrames (`fx_df`, `ensemble_df`)
   y objetos `ForecastResult`. Por eso el checkpointer usa
   `JsonPlusSerializer(pickle_fallback=True)`. Si agregas campos al estado,
-  verifica que sean serializables o el HITL/checkpoint se rompe.
+  verifica que sean serializables.
 - **Todo nodo nuevo necesita un test.** Mira `tests/unit/test_graph_nodes.py`
-  como plantilla. Si tu cambio toca el `defer`/`Send`, añade un test de regresión
-  que cuente ejecuciones.
+  como plantilla. Si tu patrón toca el `defer`/`Send` o introduce un ciclo, añade
+  un test de regresión que cuente ejecuciones.
 - **Fail-soft:** los nodos de datos no deben tumbar el pipeline; acumulan en
-  `errors` (reducer `operator.add`) y siguen. Mantén ese contrato.
+  `errors` (reducer `operator.add`) y siguen. Mantén ese contrato — también en las
+  tools de la Pista 1.
 
 ---
 
-## Parte C — Entregables
+## 8. Entregables
 
 Entrega una rama y un documento corto (`docs/experimentos/<tu-nombre>.md`) con:
 
-1. **Hipótesis** — qué creías que iba a pasar y por qué (escrita *antes* de tocar
-   código).
-2. **Línea base** — la métrica de §2 medida sobre el sistema sin tu cambio, con el
-   comando exacto que usaste (`directional_backtest`, conteo de tokens, etc.).
-3. **El cambio** — diff acotado + qué técnica de prompting o patrón LangGraph
-   aplicaste, nombrado.
-4. **Resultado** — la misma métrica después. Tablas, no adjetivos.
+1. **Pista elegida e hipótesis** — qué patrón y qué creías que iba a pasar y por
+   qué (escrito *antes* de tocar código).
+2. **Línea base** — la métrica de tu pista medida sobre el sistema sin tu cambio,
+   con el comando/procedimiento exacto que usaste.
+3. **El patrón** — diff acotado + nombra explícitamente la técnica de prompting y
+   el cableado de LangGraph que aplicaste.
+4. **Resultado** — la misma métrica después. Tablas, no adjetivos. Incluye el costo.
 5. **Veredicto honesto** — ¿se queda o se descarta? Si no funcionó, por qué crees
    que no.
 6. **Tests** verdes (`uv run pytest`).
@@ -359,10 +355,10 @@ Entrega una rama y un documento corto (`docs/experimentos/<tu-nombre>.md`) con:
 
 | Criterio | Peso |
 |---|---|
-| Diagnóstico correcto de lo que ya existe (A.0 / B.0) | 20% |
-| Técnica/patrón aplicado correctamente y con criterio | 25% |
+| Diagnóstico correcto de lo que ya existe (§4) | 20% |
+| Patrón implementado correctamente y completo (no a medias) | 25% |
 | Medición rigurosa contra la intención (§2), no por intuición | 30% |
-| Respeto a las reglas duras (serialización, `defer`, fail-soft, rutas) | 15% |
+| Respeto a las reglas duras (serialización, `defer`/ciclos, fail-soft, rutas) | 15% |
 | Honestidad intelectual (documentar lo que no funcionó) | 10% |
 
 ---
@@ -380,8 +376,7 @@ uv run cop-fx run
 uv run cop-fx run --review
 
 # Backtest direccional de la PATA DE SERIE (arima/momentum/always_up).
-# OJO: NO ejecuta el LLM — no mide tus cambios de prompt (ver §2.1).
-# directional_backtest(df, ...) necesita la serie TRM (columnas ds, y).
+# OJO: NO ejecuta el LLM — no mide tu patrón agéntico (ver §2.1).
 uv run python -c "from cop_fx.data.fx_fetcher import FXFetcher; from cop_fx.tracking.backtest import directional_backtest; _, summary = directional_backtest(FXFetcher().fetch()); print(summary)"
 
 # Tests
@@ -394,9 +389,9 @@ uv run streamlit run dashboard/app.py
 > Configuración operativa en `config.yaml` (modelo, caps de noticias, bandas).
 > `.env` es **solo secretos**. Precedencia: env > .env > yaml > defaults.
 
-**Primer paso recomendado (calentamiento offline y medible):** arma un set de
-~20 titulares etiquetados a mano (material / no material), corre `check_materiality`
-sobre ellos stubbeando el resto, y calcula precisión/recall del gate actual. Eso te
-da una línea base **real para un cambio de prompt** sin depender del backtest (que
-solo mide la serie) ni de `predictions.db` (que se llena ~1/día). De ahí, elige tu
-hilo.
+**Primer paso recomendado (diagnóstico medible):** antes de elegir pista, arma un
+set de ~20 titulares etiquetados a mano (material / no material), corre
+`check_materiality` sobre ellos stubbeando el resto, y calcula precisión/recall del
+gate actual. Te entrena el flujo completo —congelar entrada, stubbear LLM, medir—
+sin depender del backtest (que solo mide la serie) ni de `predictions.db` (que se
+llena ~1/día). De ahí, elige tu patrón.
