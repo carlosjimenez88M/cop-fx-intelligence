@@ -171,7 +171,7 @@ Guarda cada predicción + resultado real en la tabla `predictions` de BigQuery. 
 
 El costo NO está en la infra (Cloud Run scale-to-zero + Cloud Scheduler + BigQuery free tier ≈ centavos/mes). Está en **tokens de LLM**:
 
-- **Modelo barato para volumen, caro para juicio.** El proyecto corre sobre **OpenAI** (config en `cop_fx.llm` + `settings.llm_provider`). Tier `fast` = `gpt-4o-mini` para extracción/clasificación por artículo (alto volumen, tarea simple); tier `judge` = `gpt-4o` **solo** en el nodo adjudicador (1 llamada, alto valor). Cambiar de modelo o de proveedor es una línea en `.env` — todo pasa por la fábrica `get_chat_model("fast"|"judge")`.
+- **Un modelo de volumen, uno de juicio.** El proyecto corre sobre **OpenAI** (config en `cop_fx.llm` + `settings.llm_provider`). Tier `fast` = `gpt-5-mini` para todo lo que no es juicio — gate de materialidad, extracción/clasificación por artículo, agente editor y juez de keywords (alto volumen); tier `judge` = `gpt-5.4-mini` **solo** en el nodo adjudicador (1 llamada, alto valor). Cambiar de modelo o de proveedor es una línea en `config.yaml`/`.env` — todo pasa por la fábrica `get_chat_model("fast"|"judge")`.
 - **Batch, no por artículo.** Manda un digest de N artículos en un prompt, no una llamada por artículo.
 - **Embeddings solo de lo nuevo.** Cachea; nunca re-embebas un artículo ya visto.
 - **Cap de artículos** (top-K por recencia/relevancia).

@@ -2,24 +2,16 @@
 
 from __future__ import annotations
 
-import json
-import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast
 
-import pandas as pd
-from langgraph.types import Send
+from langgraph.types import Send, interrupt
 
+from cop_fx.agents.memory import MEMORY_KEY, MEMORY_NAMESPACE, build_track_record
 from cop_fx.agents.state import PipelineState, TopicWorkerState  # noqa: TC001
-from cop_fx.analysis.keyword_analysis import (
-    build_term_documents,
-    judge_terms,
-    pairwise_phi,
-    rank_terms,
-)
+from cop_fx.analysis.gold_store import persist_articles, persist_keyword_insights
 from cop_fx.analysis.news_analyzer import AnalyzedArticle, NewsAnalyzer
-from cop_fx.analysis.topic_taxonomy import article_importance
 from cop_fx.config.settings import get_settings
 from cop_fx.contracts import (
     RELEVANCE_WEIGHT,
@@ -42,7 +34,7 @@ from cop_fx.data.market_fetcher import MARKET_SYMBOLS, fetch_yahoo_series
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
 from cop_fx.logger import get_logger
-from cop_fx.paths import DATA_DIR, PROJECT_ROOT
+from cop_fx.paths import PROJECT_ROOT
 from cop_fx.timeseries.evaluator import evaluate
 from cop_fx.timeseries.models import (
     ARIMAForecaster,
@@ -51,6 +43,9 @@ from cop_fx.timeseries.models import (
     ensemble_forecast,
 )
 from cop_fx.tracking.predictions import PredictionStore
+
+if TYPE_CHECKING:
+    import pandas as pd
 
 logger = get_logger(__name__)
 
@@ -200,6 +195,43 @@ def fetch_market(state: PipelineState) -> PipelineState:
     except Exception as exc:
         logger.warning("fetch_market failed (%s) — el contexto es opcional", exc)
         return {"market_signal": {}}
+
+
+# ---------------------------------------------------------------------------
+# Node: load_memory  (Etapa 6 — memoria entre corridas)
+# ---------------------------------------------------------------------------
+
+
+def load_memory(state: PipelineState) -> PipelineState:
+    """Hidrata el track-record histórico para que el adjudicador se calibre.
+
+    Rama paralela desde START, SIN arista de salida (igual que fetch_market):
+    escribe `prior_performance` en el estado y el `defer` del adjudicador lo
+    espera. Lee la fuente durable (`predictions.db`) y, si el grafo se compiló
+    con un `BaseStore`, publica el récord en la memoria de largo plazo
+    namespaced — la interfaz store.put/get de LangGraph.
+    """
+    try:
+        record = build_track_record(PredictionStore())
+    except Exception as exc:
+        logger.warning("load_memory: no se pudo leer el historial (%s)", exc)
+        return {"prior_performance": {}}
+
+    if record:
+        try:
+            from langgraph.config import get_store
+
+            store = get_store()
+            if store is not None:
+                store.put(MEMORY_NAMESPACE, MEMORY_KEY, record)
+        except Exception:  # el store es opcional (grafo compilado sin store)
+            pass
+        logger.info(
+            "Memoria: %d llamadas evaluadas, acierto %s",
+            record.get("n_decided", 0),
+            record.get("hit_rate"),
+        )
+    return {"prior_performance": record}
 
 
 # ---------------------------------------------------------------------------
@@ -384,281 +416,6 @@ def _apply_scope_guard(articles: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return guarded
 
 
-def _persist_gold_articles(articles: list[dict[str, Any]]) -> None:
-    """Persist latest GOLD article classifications for dashboard/notebooks."""
-    if not articles:
-        return
-    db_path = DATA_DIR / "cnn_articles.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    rows = []
-    now = datetime.now(UTC).isoformat()
-    for article in articles:
-        published = article.get("published_at")
-        if isinstance(published, datetime):
-            published_at = published.isoformat()
-        else:
-            published_at = str(published or "")
-        rows.append(
-            (
-                article.get("title", ""),
-                article.get("author", ""),
-                published_at,
-                article.get("summary", ""),
-                article.get("url", ""),
-                article.get("source", ""),
-                article.get("topic", "other"),
-                json.dumps(article.get("keywords") or [], ensure_ascii=False),
-                now,
-                json.dumps(article.get("entities") or [], ensure_ascii=False),
-                article.get("fx_relevance", "none"),
-                article.get("fx_channel", "none"),
-                article.get("severity", "low"),
-                int(bool(article.get("bullish_cop", False))),
-                article.get("reasoning", ""),
-            )
-        )
-
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS articles (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                title TEXT,
-                author TEXT,
-                published_at TEXT,
-                summary TEXT,
-                url TEXT,
-                source TEXT,
-                topic TEXT,
-                keywords TEXT,
-                fetched_at TEXT,
-                entities TEXT,
-                fx_relevance TEXT,
-                fx_channel TEXT,
-                severity TEXT,
-                bullish_cop INTEGER,
-                reasoning TEXT
-            )
-            """
-        )
-        conn.execute("DELETE FROM articles")
-        conn.executemany(
-            """
-            INSERT INTO articles (
-                title, author, published_at, summary, url, source, topic,
-                keywords, fetched_at, entities, fx_relevance, fx_channel,
-                severity, bullish_cop, reasoning
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            rows,
-        )
-    logger.info("Persisted %d GOLD articles to %s", len(rows), db_path)
-
-
-def _entity_rollup_for_pipeline(
-    articles: pd.DataFrame,
-    *,
-    domain_stopwords: list[str],
-    top_n: int = 20,
-) -> pd.DataFrame:
-    rows: list[dict[str, Any]] = []
-    stopwords = {word.casefold() for word in domain_stopwords}
-    for _, row in articles.iterrows():
-        for entity in row.get("entities_list") or []:
-            if str(entity).casefold() in stopwords:
-                continue
-            rows.append(
-                {
-                    "term": str(entity),
-                    "score": float(row.get("importance") or 0.0),
-                    "article_count": 1,
-                }
-            )
-    if not rows:
-        return pd.DataFrame(columns=["term", "score", "article_count"])
-    return (
-        pd.DataFrame(rows)
-        .groupby("term", as_index=False)
-        .agg(score=("score", "sum"), article_count=("article_count", "sum"))
-        .sort_values(["score", "article_count"], ascending=False)
-        .head(top_n)
-    )
-
-
-def _persist_gold_keyword_insights(articles: list[dict[str, Any]]) -> None:
-    """Persist keyword rankings for the dashboard and pairwise pairs for research."""
-    if not articles:
-        return
-    import pandas as pd
-
-    settings = get_settings()
-    now = datetime.now(UTC).isoformat()
-    material = pd.DataFrame([item for item in articles if item.get("fx_relevance") != "none"])
-    db_path = DATA_DIR / "cnn_articles.db"
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-
-    with sqlite3.connect(db_path) as conn:
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS keyword_terms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                term TEXT,
-                term_key TEXT,
-                score REAL,
-                article_count INTEGER,
-                llm_score REAL,
-                reason TEXT,
-                computed_at TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS keyword_pairs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                item1 TEXT,
-                item2 TEXT,
-                correlation REAL,
-                n_both INTEGER,
-                computed_at TEXT
-            )
-            """
-        )
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS keyword_entities (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                term TEXT,
-                score REAL,
-                article_count INTEGER,
-                computed_at TEXT
-            )
-            """
-        )
-        conn.execute("DELETE FROM keyword_terms")
-        conn.execute("DELETE FROM keyword_pairs")
-        conn.execute("DELETE FROM keyword_entities")
-
-        if material.empty:
-            return
-
-        material["keywords_list"] = material["keywords"].apply(lambda value: list(value or []))
-        material["entities_list"] = material["entities"].apply(lambda value: list(value or []))
-        material["importance"] = material.apply(article_importance, axis=1)
-        term_docs = build_term_documents(
-            material,
-            domain_stopwords=settings.keyword_domain_stopwords,
-            include_entities=False,
-        )
-        if term_docs.empty:
-            entities = _entity_rollup_for_pipeline(
-                material,
-                domain_stopwords=settings.keyword_domain_stopwords,
-            )
-            conn.executemany(
-                """
-                INSERT INTO keyword_entities (term, score, article_count, computed_at)
-                VALUES (?, ?, ?, ?)
-                """,
-                [
-                    (
-                        str(row["term"]),
-                        float(str(row["score"])),
-                        int(float(str(row["article_count"]))),
-                        now,
-                    )
-                    for row in entities.to_dict("records")
-                ],
-            )
-            return
-
-        candidate_terms = (
-            term_docs.groupby(["term_key", "term"], as_index=False)
-            .agg(score=("importance", "sum"), noticias=("doc_id", "nunique"))
-            .sort_values(["score", "noticias"], ascending=False)
-            .head(max(settings.keyword_top_n * 2, 30))["term"]
-            .tolist()
-        )
-        decisions = judge_terms(
-            candidate_terms,
-            use_llm=settings.keyword_llm_judge_enabled,
-            domain_stopwords=settings.keyword_domain_stopwords,
-        )
-        terms = rank_terms(
-            term_docs,
-            decisions,
-            min_articles=settings.keyword_min_articles,
-            top_n=settings.keyword_top_n,
-        )
-        pairs = pairwise_phi(
-            term_docs,
-            terms["termino"].tolist() if not terms.empty else [],
-            min_joint=settings.keyword_pairwise_min_joint,
-        )
-        if not pairs.empty:
-            pairs = pairs[
-                pairs["correlation"] >= settings.keyword_pairwise_min_correlation
-            ].head(settings.keyword_pairwise_top_n)
-        entities = _entity_rollup_for_pipeline(
-            material,
-            domain_stopwords=settings.keyword_domain_stopwords,
-        )
-
-        conn.executemany(
-            """
-            INSERT INTO keyword_terms (
-                term, term_key, score, article_count, llm_score, reason, computed_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    str(row["termino"]),
-                    str(row["term_key"]),
-                    float(str(row["score"])),
-                    int(float(str(row["noticias"]))),
-                    float(str(row["llm_score"])),
-                    str(row["reason"]),
-                    now,
-                )
-                for row in terms.to_dict("records")
-            ],
-        )
-        conn.executemany(
-            """
-            INSERT INTO keyword_pairs (item1, item2, correlation, n_both, computed_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (
-                    str(row["item1"]),
-                    str(row["item2"]),
-                    float(str(row["correlation"])),
-                    int(float(str(row["n_both"]))),
-                    now,
-                )
-                for row in pairs.to_dict("records")
-            ],
-        )
-        conn.executemany(
-            """
-            INSERT INTO keyword_entities (term, score, article_count, computed_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            [
-                (
-                    str(row["term"]),
-                    float(str(row["score"])),
-                    int(float(str(row["article_count"]))),
-                    now,
-                )
-                for row in entities.to_dict("records")
-            ],
-        )
-    logger.info("Persisted GOLD keyword insights to %s", db_path)
-
-
 def orchestrate(state: PipelineState) -> PipelineState:
     """Agrupa artículos en clusters por tópico usando los tags del gate.
 
@@ -784,8 +541,8 @@ def aggregate_signals(state: PipelineState) -> PipelineState:
     )
     if state.get("persist_gold", False):
         try:
-            _persist_gold_articles(analyzed)
-            _persist_gold_keyword_insights(analyzed)
+            persist_articles(analyzed)
+            persist_keyword_insights(analyzed)
         except Exception as exc:
             logger.warning("No se pudo persistir la capa GOLD: %s", exc)
     return {
@@ -1059,6 +816,13 @@ Brent are background, not votes. Use this as evidence to break ties or
 temper confidence — do not treat it as a third signal to echo:
 {market_signal}
 
+RECENT TRACK RECORD (your own past calls, already scored against the realized
+TRM — this is the desk's memory across runs). Use it to calibrate, not to
+predict: if recent decisive calls were wrong, or high-confidence calls failed,
+demand stronger fresh evidence today and lean toward lower confidence or
+neutral. Do NOT mechanically repeat or invert yesterday's direction:
+{track_record}
+
 Current rate: 1 USD = {latest:,.2f} COP ({change:+.2f}% vs 30 days ago).
 
 Rules of reasoning — in this order:
@@ -1259,6 +1023,7 @@ def adjudicate(state: PipelineState) -> PipelineState:
     market = state.get("market_signal") or {}
     market_model = MarketSignal.model_validate(market) if market else None
     top_story = state.get("top_story") or {}
+    prior = state.get("prior_performance") or {}
     prompt = _ADJUDICATOR_PROMPT.format(
         horizon=horizon,
         news_signal=news.model_dump_json(),
@@ -1266,6 +1031,7 @@ def adjudicate(state: PipelineState) -> PipelineState:
         ts_signal=ts.model_dump_json(),
         top_story=top_story or "(no top story today)",
         market_signal=market or "(not available today)",
+        track_record=prior.get("digest") or "(sin historial previo — primera(s) corrida(s))",
         latest=state.get("latest_rate", 0.0),
         change=state.get("rate_change_pct", 0.0),
     )
@@ -1488,6 +1254,43 @@ def _shorten(text: str, max_chars: int) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Node: human_review  (Etapa 6 — HITL con interrupt antes de publicar)
+# ---------------------------------------------------------------------------
+
+
+def human_review(state: PipelineState) -> PipelineState:
+    """Punto de control humano antes de publicar (human-in-the-loop).
+
+    Solo actúa con `hitl_enabled=True` (que exige un checkpointer). Llama a
+    `interrupt(...)` con el tweet y el veredicto: el grafo SE PAUSA y el payload
+    vuelve al llamador (CLI/dashboard). La corrida se reanuda con
+    `Command(resume={"approved": bool})` y ese valor es lo que devuelve
+    `interrupt`. Sin HITL es un passthrough — el comportamiento por defecto del
+    pipeline no cambia.
+    """
+    if not state.get("hitl_enabled", False):
+        return {}
+
+    call = state.get("directional_call") or {}
+    decision = interrupt(
+        {
+            "type": "publish_approval",
+            "tweet_text": state.get("tweet_text", ""),
+            "direction": call.get("direction"),
+            "confidence": call.get("confidence"),
+            "question": "¿Publicar este tweet? Reanuda con {'approved': true|false}.",
+        }
+    )
+    approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
+    edited = decision.get("tweet_text") if isinstance(decision, dict) else None
+    logger.info("human_review: %s", "aprobado" if approved else "rechazado")
+    updates: PipelineState = {"publish_approved": approved}
+    if edited:
+        updates["tweet_text"] = str(edited)
+    return updates
+
+
+# ---------------------------------------------------------------------------
 # Node: publish
 # ---------------------------------------------------------------------------
 
@@ -1496,6 +1299,9 @@ def publish(state: PipelineState) -> PipelineState:
     """Post the daily tweet (only when twitter_enabled=True)."""
     if not state.get("publish_enabled", False):
         logger.info("publish: skipped (publish_enabled=False)")
+        return {}
+    if state.get("hitl_enabled", False) and not state.get("publish_approved", False):
+        logger.info("publish: skipped (HITL — humano no aprobó)")
         return {}
 
     settings = get_settings()

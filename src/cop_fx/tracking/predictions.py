@@ -246,6 +246,30 @@ class PredictionStore:
         with self._conn() as conn:
             return pd.read_sql("SELECT * FROM predictions ORDER BY run_date DESC", conn)
 
+    def recent_calls(self, limit: int = 5) -> list[dict[str, Any]]:
+        """Últimas corridas (más nuevas primero) — la materia prima de la memoria.
+
+        Lee solo lo que el adjudicador necesita para calibrarse contra su propio
+        historial: qué llamó, con cuánta confianza, qué señal dominó y si acertó
+        cuando el horizonte ya venció. Cero pandas: una consulta barata.
+        """
+        cols = (
+            "run_date",
+            "direction",
+            "confidence",
+            "reconciliation",
+            "dominant_signal",
+            "actual_direction",
+            "final_hit",
+        )
+        with self._conn() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                f"SELECT {', '.join(cols)} FROM predictions ORDER BY run_date DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
     def metrics(self) -> dict[str, Any]:
         """Métricas direccionales sobre las predicciones ya evaluadas."""
         import pandas as pd

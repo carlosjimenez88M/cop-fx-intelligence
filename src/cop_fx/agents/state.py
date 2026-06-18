@@ -43,6 +43,9 @@ class PipelineState(TypedDict, total=False):
     market_signal: dict[str, Any]  # MarketSignal serializado (contexto)
     directional_call: dict[str, Any]  # DirectionalCall serializado
 
+    # ── Memoria entre corridas (Etapa 6) ──────────────────────────────
+    prior_performance: dict[str, Any]  # track-record destilado para el adjudicador
+
     # ── Forecast ──────────────────────────────────────────────────────
     prophet_result: Any
     arima_result: Any
@@ -61,3 +64,7 @@ class PipelineState(TypedDict, total=False):
     errors: Annotated[list[str], operator.add]
     publish_enabled: bool
     persist_gold: bool
+    # HITL (Etapa 6): cuando hitl_enabled, el nodo human_review hace `interrupt`
+    # antes de publicar y espera un Command(resume=...) con la decisión humana.
+    hitl_enabled: bool
+    publish_approved: bool

@@ -89,7 +89,7 @@ Reglas importantes: español estricto en texto natural, penalización de noticia
 
 **Dos archivos, responsabilidades separadas** (precedencia: env vars > `.env` > `config.yaml` > defaults):
 
-- [`config.yaml`](config.yaml) — **toda** la configuración operativa: modelo (`gpt-5.4-mini` en tiers fast/judge), nº de artículos, feeds, bandas muertas, tope de workers, horizonte...
+- [`config.yaml`](config.yaml) — **toda** la configuración operativa: modelos (`gpt-5-mini` para el tier fast / `gpt-5.4-mini` para el tier judge), nº de artículos, feeds, bandas muertas, tope de workers, horizonte...
 - [`.env`](.env.example) — **solo secretos**: `OPENAI_API_KEY` (obligatoria), Alpha Vantage / NewsAPI / Twitter (opcionales).
 
 Las rutas son absolutas vía `cop_fx.paths` (derivadas del paquete, nunca del cwd) — todo funciona desde cualquier directorio.
@@ -110,7 +110,7 @@ uv run streamlit run dashboard/app.py     # desk: call, keywords, topics, foreca
 uv run pytest -m unit                      # tests rápidos sin I/O real
 ```
 
-Costo por corrida: ~9-11 llamadas a `gpt-5.4-mini` ≈ **fracciones de centavo**.
+Cada corrida son ~9-11 llamadas al LLM: el grueso al tier fast (`gpt-5-mini`) y **una sola** al tier judge (`gpt-5.4-mini`), el adjudicador.
 
 ### Configuración operativa
 
@@ -171,6 +171,34 @@ El nodo `publish` usa Tweepy v4 (`tweepy.Client.create_tweet`) y solo publica cu
 
 ---
 
+## Memoria entre corridas y aprobación humana (Etapa 6)
+
+El grafo usa las **dos memorias** de LangGraph, cada una con un rol distinto:
+
+- **Memoria de largo plazo (entre corridas).** El nodo `load_memory` lee el
+  track-record durable de `predictions.db` (qué llamó el sistema, con cuánta
+  confianza y si acertó al vencer el horizonte) y lo inyecta como contexto al
+  adjudicador. El juez se calibra contra su propio historial — "tus últimas
+  llamadas de alta confianza fallaron; exige más evidencia" — en vez de empezar
+  cada día desde cero. Va siempre activa; corre como rama paralela sin arista
+  hacia el adjudicador (no altera el conteo de triggers del nodo deferred).
+
+- **Memoria de corto plazo + HITL (`interrupt`).** Con `--review`, el grafo se
+  compila con un **checkpointer** durable (SQLite) bajo un `thread_id` y se
+  pausa en `human_review` antes de publicar, devolviendo el tweet propuesto.
+  La corrida se reanuda en otro proceso con la decisión humana:
+
+```bash
+uv run cop-fx run --review --publish          # corre y PAUSA pidiendo aprobación
+uv run cop-fx resume --thread <fecha> --approve   # publica
+uv run cop-fx resume --thread <fecha> --reject    # descarta sin publicar
+```
+
+El resume no recomputa el LLM: continúa desde el checkpoint (estado restaurado
+de SQLite) y solo ejecuta `human_review → publish`.
+
+---
+
 ## Estructura
 
 ```
@@ -186,11 +214,17 @@ src/cop_fx/
 │   ├── news_fetcher.py      ← Feeds verificados + orden fecha/fuentes intercaladas
 │   ├── article_body.py      ← Texto COMPLETO del artículo (estilo readability)
 │   └── cnn_fetcher.py       ← CNN Español Colombia (RSS + HTML)
-├── analysis/news_analyzer.py← Clasificación estructurada sobre texto completo
+├── analysis/
+│   ├── news_analyzer.py     ← Clasificación estructurada sobre texto completo
+│   ├── topic_taxonomy.py    ← Familias de tópicos, canal e importancia
+│   ├── keyword_analysis.py  ← Ranking de keywords + co-ocurrencia φ
+│   └── gold_store.py        ← Persistencia GOLD a SQLite (separada del grafo)
 ├── agents/
 │   ├── state.py             ← PipelineState (reducers para el fan-out)
-│   ├── nodes.py             ← Los 12 nodos del grafo
-│   └── graph.py             ← build_graph() + run_pipeline()
+│   ├── nodes.py             ← Los nodos del grafo (incl. load_memory, human_review)
+│   ├── memory.py            ← Memoria de largo plazo: track-record → adjudicador
+│   ├── persistence.py       ← Checkpointer (SqliteSaver) + store de memoria
+│   └── graph.py             ← build_graph() / compile_graph() / run_pipeline() / resume_pipeline()
 ├── timeseries/
 │   ├── models.py            ← Prophet + ARIMA(2,1,2) — orden respaldado por BIC y backtest
 │   ├── diagnostics.py       ← ADF/KPSS, ACF/PACF, grid AIC/BIC, Ljung-Box
@@ -230,7 +264,7 @@ dashboard/app.py             ← Streamlit: call operativo, keywords GOLD, topic
 | 4. Adjudicador (capa de racionalidad) | ✅ |
 | 5. Tabla `predictions` + backtest direccional | ✅ |
 | — Agente editor (noticia del día), `MarketSignal`, dashboard | ✅ |
-| 6. Checkpointer + HITL (`interrupt`) + memoria entre corridas | ⏳ |
+| 6. Checkpointer + HITL (`interrupt`) + memoria entre corridas | ✅ |
 | 7. GCP (Cloud Run Jobs + Scheduler + BigQuery) | ⏳ |
 
 ---

@@ -61,10 +61,10 @@ class Settings(BaseSettings):
     )
     openai_api_key: SecretStr | None = Field(None, description="OpenAI API key (.env)")
     anthropic_api_key: SecretStr | None = Field(None, description="Anthropic API key (.env)")
-    # tier 'fast' — alto volumen, barato (clasificar/extraer por noticia)
-    llm_model: str = Field("gpt-4o-mini", description="Modelo barato para volumen")
+    # tier 'fast' — alto volumen (clasificar/extraer por noticia, gate, keywords)
+    llm_model: str = Field("gpt-5-mini", description="Modelo de volumen para los tiers no-juez")
     # tier 'judge' — 1 llamada de alto valor (adjudicador / reconciliación)
-    llm_model_judge: str = Field("gpt-4o", description="Modelo fuerte para el juicio final")
+    llm_model_judge: str = Field("gpt-5.4-mini", description="Modelo fuerte para el juicio final")
     llm_temperature: float = Field(0.1, ge=0.0, le=1.0)
 
     # ------------------------------------------------------------------
