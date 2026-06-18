@@ -22,8 +22,6 @@ dependencies = [
     "prophet>=1.1",
     "statsmodels>=0.14",
     "pmdarima>=2.0",
-    # Social publishing
-    "tweepy>=4.14",
     # Settings / config
     "pydantic-settings>=2.4",
     "pydantic>=2.8",

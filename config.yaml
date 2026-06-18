@@ -37,4 +37,3 @@ forecast_horizon_days: 7
 environment: development
 log_level: INFO
 report_output_dir: reports       # relativo = se resuelve contra la raíz del repo
-twitter_enabled: false

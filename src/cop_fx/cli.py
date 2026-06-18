@@ -1,4 +1,4 @@
-"""CLI entry point: `cop-fx run [--publish] [--review]` y `cop-fx resume`."""
+"""CLI entry point: `cop-fx run [--review]` y `cop-fx resume`."""
 
 from __future__ import annotations
 
@@ -41,16 +41,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
     run_parser = sub.add_parser("run", help="Execute the daily analysis pipeline")
     run_parser.add_argument(
-        "--publish",
-        action="store_true",
-        default=False,
-        help="Post the generated tweet (requires Twitter credentials)",
-    )
-    run_parser.add_argument(
         "--review",
         action="store_true",
         default=False,
-        help="Human-in-the-loop: pausa en human_review antes de publicar (interrupt)",
+        help="Human-in-the-loop: pausa en human_review para revisar el veredicto (interrupt)",
     )
     run_parser.add_argument(
         "--thread",
@@ -64,15 +58,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     resume_parser = sub.add_parser(
-        "resume", help="Reanuda una corrida HITL pausada y aprueba/rechaza la publicación"
+        "resume", help="Reanuda una corrida HITL pausada y acepta/rechaza el veredicto"
     )
     resume_parser.add_argument("--thread", required=True, help="thread_id de la corrida pausada")
     decision = resume_parser.add_mutually_exclusive_group(required=True)
-    decision.add_argument("--approve", action="store_true", help="Aprobar y publicar")
-    decision.add_argument("--reject", action="store_true", help="Rechazar (no publicar)")
-    resume_parser.add_argument(
-        "--tweet-text", default=None, help="Texto editado opcional para el tweet aprobado"
-    )
+    decision.add_argument("--approve", action="store_true", help="Aceptar el veredicto")
+    decision.add_argument("--reject", action="store_true", help="Rechazar el veredicto")
     return parser
 
 
@@ -80,12 +71,10 @@ def _cmd_run(args: argparse.Namespace, log: structlog.BoundLogger) -> None:
     log.info(
         "Starting COP/USD pipeline",
         run_date=args.date,
-        publish=args.publish,
         review=args.review,
     )
     state = run_pipeline(
         run_date=args.date,
-        publish_enabled=args.publish,
         hitl=args.review,
         thread_id=args.thread,
     )
@@ -94,13 +83,13 @@ def _cmd_run(args: argparse.Namespace, log: structlog.BoundLogger) -> None:
     if payload is not None:
         thread = args.thread or args.date
         log.info("Pipeline paused for human review", thread_id=thread)
-        print("\n⏸️  HITL — revisión humana requerida antes de publicar:\n")
+        print("\n⏸️  HITL — revisión humana del veredicto:\n")
         print(
             f"   Dirección: {payload.get('direction')}  ·  "
             f"confianza: {payload.get('confidence')}"
         )
-        print(f"   Tweet propuesto:\n   {payload.get('tweet_text')}\n")
-        print("   Aprobar:  cop-fx resume --thread", thread, "--approve")
+        print(f"   Reporte: {payload.get('report_path')}\n")
+        print("   Aceptar:  cop-fx resume --thread", thread, "--approve")
         print("   Rechazar: cop-fx resume --thread", thread, "--reject")
         return
 
@@ -113,7 +102,6 @@ def _cmd_run(args: argparse.Namespace, log: structlog.BoundLogger) -> None:
         "Pipeline complete",
         report=state.get("report_path"),
         latest_rate=state.get("latest_rate"),
-        tweet_id=state.get("tweet_id"),
     )
     print(state.get("report_markdown", ""))
 
@@ -124,19 +112,13 @@ def _cmd_resume(args: argparse.Namespace, log: structlog.BoundLogger) -> None:
     state = resume_pipeline(
         thread_id=args.thread,
         approved=approved,
-        tweet_text=args.tweet_text,
     )
     errors = state.get("errors", [])
     if errors:
         log.error("Resumed pipeline completed with errors", errors=errors)
         sys.exit(1)
-    log.info(
-        "Resume complete",
-        approved=approved,
-        tweet_id=state.get("tweet_id"),
-    )
-    if approved and not state.get("tweet_id"):
-        print("Aprobado, pero no se publicó (revisa publish_enabled/twitter_enabled).")
+    log.info("Resume complete", approved=approved)
+    print(f"Veredicto {'aceptado' if approved else 'rechazado'}.")
 
 
 def main() -> None:

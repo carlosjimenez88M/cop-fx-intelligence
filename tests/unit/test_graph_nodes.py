@@ -41,7 +41,6 @@ def _base_state(**overrides: Any) -> PipelineState:
     state: PipelineState = {
         "run_date": "2024-06-01",
         "horizon_days": 3,
-        "publish_enabled": False,
         "errors": [],
         "raw_articles": [],
         "analyzed_articles": [],
@@ -633,11 +632,13 @@ def test_generate_report_creates_markdown(sample_fx_df: pd.DataFrame, tmp_path: 
         result = generate_report(state)
 
     assert "report_markdown" in result
+    assert "report_path" in result
     assert "1 USD = 4,050.00 COP" in result["report_markdown"]
     assert "+1.25%" in result["report_markdown"]
-    assert result.get("tweet_text", "").startswith("COP/USD")
-    assert "Noticia clave:" in result.get("tweet_text", "")
-    assert len(result.get("tweet_text", "")) <= 280
+    # El reporte es el producto final (ya no hay tweet).
+    assert "Market Narrative" in result["report_markdown"]
+    assert "Peso weakened due to global risk-off." in result["report_markdown"]
+    assert "tweet_text" not in result
 
 
 # ── order_articles: mismo día = mismo pie ────────────────────────────────

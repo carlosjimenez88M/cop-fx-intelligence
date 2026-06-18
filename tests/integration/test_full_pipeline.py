@@ -155,17 +155,16 @@ def test_full_pipeline_runs_end_to_end(synthetic_fx_df: pd.DataFrame, tmp_path: 
         settings = MagicMock()
         settings.forecast_horizon_days = 5
         settings.report_output_dir = str(tmp_path)
-        settings.twitter_enabled = False
         MockSettings.return_value = settings
         MockFX.return_value.fetch.return_value = synthetic_fx_df
         MockNews.return_value.fetch.return_value = fake_articles
 
-        final_state = run_pipeline(run_date="2024-06-01", publish_enabled=False)
+        final_state = run_pipeline(run_date="2024-06-01")
 
     # Validate output keys
     assert "report_markdown" in final_state
     assert "ensemble_df" in final_state
-    assert "tweet_text" in final_state
+    assert "report_path" in final_state
 
     # Etapa 4: el veredicto direccional llega completo al estado final
     call = final_state.get("directional_call", {})
@@ -217,7 +216,6 @@ def test_pipeline_handles_news_fetch_failure(synthetic_fx_df: pd.DataFrame, tmp_
         settings = MagicMock()
         settings.forecast_horizon_days = 3
         settings.report_output_dir = str(tmp_path)
-        settings.twitter_enabled = False
         MockSettings.return_value = settings
         MockFX.return_value.fetch.return_value = synthetic_fx_df
         MockNews.return_value.fetch.side_effect = ConnectionError("RSS unreachable")
@@ -275,8 +273,7 @@ def test_hitl_interrupt_pauses_then_resume_respects_rejection(
     initial_state = {
         "run_date": "2024-06-01",
         "horizon_days": 5,
-        "publish_enabled": True,  # con intención de publicar...
-        "persist_gold": False,  # ...pero sin tocar las DBs reales en el test
+        "persist_gold": False,  # sin tocar las DBs reales en el test
         "hitl_enabled": True,
         "errors": [],
         "raw_articles": [],
@@ -302,7 +299,6 @@ def test_hitl_interrupt_pauses_then_resume_respects_rejection(
         settings = MagicMock()
         settings.forecast_horizon_days = 5
         settings.report_output_dir = str(tmp_path)
-        settings.twitter_enabled = True  # publish intentaría tuitear si se aprobara
         MockSettings.return_value = settings
         MockFX.return_value.fetch.return_value = synthetic_fx_df
         MockNews.return_value.fetch.return_value = [article]
@@ -310,15 +306,14 @@ def test_hitl_interrupt_pauses_then_resume_respects_rejection(
         compiled = compile_graph(checkpointer=saver)
 
         paused = compiled.invoke(initial_state, config=config)
-        # El grafo se detuvo en human_review: hay un interrupt con el tweet.
+        # El grafo se detuvo en human_review: hay un interrupt con el veredicto.
         assert paused.get("__interrupt__"), "el grafo debió pausar en human_review"
         payload = paused["__interrupt__"][0].value
-        assert payload["type"] == "publish_approval"
-        assert payload["tweet_text"]
+        assert payload["type"] == "verdict_review"
+        assert payload["direction"] in ("down", "up", "neutral")
 
-        # El humano RECHAZA → publish no debe ejecutarse.
+        # El humano RECHAZA el veredicto.
         final = compiled.invoke(Command(resume={"approved": False}), config=config)
 
-    assert final.get("publish_approved") is False
-    assert final.get("tweet_id") is None  # rechazado: no se publicó
+    assert final.get("review_approved") is False
     assert "directional_call" in final

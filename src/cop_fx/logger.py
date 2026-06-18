@@ -12,7 +12,7 @@ Usage
     log.info("rate fetched: %s", 4200.5)
     log.success("pipeline complete")   # bright green ✔
     log.warning("BanRep fallback used")
-    log.error("tweet failed: %s", err)
+    log.error("fetch failed: %s", err)
     log.critical("unrecoverable error")
 
 Colour map

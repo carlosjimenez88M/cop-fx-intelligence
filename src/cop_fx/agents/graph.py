@@ -21,7 +21,6 @@ from cop_fx.agents.nodes import (
     load_memory,
     orchestrate,
     pick_top_story,
-    publish,
     record_prediction,
     route_materiality,
     run_forecast,
@@ -61,7 +60,7 @@ def build_graph() -> StateGraph[PipelineState]:
                             aggregate_signals ─────────► adjudicate (defer)
                                    ▼ pick_top_story            │
                           generate_report ─► record_prediction │
-                                   └─► human_review (HITL) ─► publish ─► END
+                                   └─► human_review (HITL) ─► END
 
     Mecanismos de LangGraph trabajando juntos:
       - `Send` (orchestrator-workers): la cantidad de workers varía cada día
@@ -71,7 +70,7 @@ def build_graph() -> StateGraph[PipelineState]:
         arista hacia adjudicate a propósito: escriben en el estado (market_signal,
         prior_performance) y el defer las espera, sin sumar un trigger extra que
         dispararía el nodo deferred más de una vez.
-      - `interrupt` (HITL): el nodo human_review pausa antes de publish cuando
+      - `interrupt` (HITL): el nodo human_review pausa antes de finalizar cuando
         hitl_enabled; se reanuda con Command(resume=...) sobre el mismo thread_id.
       - Checkpointer + Store: ver `compile_graph`.
     """
@@ -93,7 +92,6 @@ def build_graph() -> StateGraph[PipelineState]:
     graph.add_node("generate_report", generate_report)
     graph.add_node("record_prediction", record_prediction)
     graph.add_node("human_review", human_review)
-    graph.add_node("publish", publish)
 
     # Ramas paralelas desde START. fetch_market y load_memory no tienen arista
     # de salida a propósito (escriben estado que el defer del adjudicador espera).
@@ -125,8 +123,7 @@ def build_graph() -> StateGraph[PipelineState]:
     graph.add_edge("adjudicate", "generate_report")
     graph.add_edge("generate_report", "record_prediction")
     graph.add_edge("record_prediction", "human_review")
-    graph.add_edge("human_review", "publish")
-    graph.add_edge("publish", END)
+    graph.add_edge("human_review", END)
 
     return graph
 
@@ -153,7 +150,6 @@ def compile_graph(
 def run_pipeline(
     *,
     run_date: str | None = None,
-    publish_enabled: bool = False,
     hitl: bool = False,
     thread_id: str | None = None,
     persistent_checkpoint: bool = True,
@@ -170,7 +166,6 @@ def run_pipeline(
     initial_state: PipelineState = {
         "run_date": run_date,
         "horizon_days": settings.forecast_horizon_days,
-        "publish_enabled": publish_enabled,
         "persist_gold": True,
         "hitl_enabled": hitl,
         "errors": [],
@@ -201,7 +196,6 @@ def resume_pipeline(
     *,
     thread_id: str,
     approved: bool,
-    tweet_text: str | None = None,
     persistent_checkpoint: bool = True,
 ) -> PipelineState:
     """Reanuda una corrida pausada en `human_review` con la decisión humana.
@@ -212,8 +206,6 @@ def resume_pipeline(
     checkpointer = get_checkpointer(persistent=persistent_checkpoint)
     config: RunnableConfig = {"configurable": {"thread_id": thread_id}}
     resume_value: dict[str, Any] = {"approved": approved}
-    if tweet_text:
-        resume_value["tweet_text"] = tweet_text
 
     compiled = compile_graph(checkpointer=checkpointer)
     command: Command[Any] = Command(resume=resume_value)

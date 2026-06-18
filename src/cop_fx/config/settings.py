@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     DOS archivos, responsabilidades separadas:
       - ``config.yaml`` (raíz): TODA la configuración operativa — modelo,
         número de artículos, feeds, bandas, workers. Editable sin tocar código.
-      - ``.env`` (raíz): SOLO secretos (API keys, tokens de Twitter).
+      - ``.env`` (raíz): SOLO secretos (API keys).
 
     Precedencia: env vars > .env > config.yaml > defaults del código.
     Rutas absolutas vía cop_fx.paths — funciona sin importar el cwd.
@@ -139,16 +139,6 @@ class Settings(BaseSettings):
     market_dead_band_pct: float = Field(
         0.30, ge=0.0, description="Banda muerta del equity (sin sesgo de mercado)"
     )
-
-    # ------------------------------------------------------------------
-    # Twitter / X
-    # ------------------------------------------------------------------
-    twitter_api_key: SecretStr | None = Field(None)
-    twitter_api_secret: SecretStr | None = Field(None)
-    twitter_access_token: SecretStr | None = Field(None)
-    twitter_access_token_secret: SecretStr | None = Field(None)
-    twitter_bearer_token: SecretStr | None = Field(None)
-    twitter_enabled: bool = Field(False, description="Post tweets when True")
 
     # ------------------------------------------------------------------
     # App behaviour

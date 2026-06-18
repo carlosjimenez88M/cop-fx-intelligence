@@ -55,16 +55,13 @@ class PipelineState(TypedDict, total=False):
     # ── Report ────────────────────────────────────────────────────────
     report_markdown: str
     report_path: str  # local file path
-    tweet_text: str
-    tweet_id: str | None  # set after publishing
 
     # ── Control ───────────────────────────────────────────────────────
     # Reducer: ramas paralelas (fetch_fx / fetch_news) pueden aportar
     # errores en el mismo paso — operator.add los concatena en vez de chocar.
     errors: Annotated[list[str], operator.add]
-    publish_enabled: bool
     persist_gold: bool
     # HITL (Etapa 6): cuando hitl_enabled, el nodo human_review hace `interrupt`
-    # antes de publicar y espera un Command(resume=...) con la decisión humana.
+    # con el veredicto y espera un Command(resume=...) con la decisión humana.
     hitl_enabled: bool
-    publish_approved: bool
+    review_approved: bool

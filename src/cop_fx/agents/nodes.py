@@ -1131,7 +1131,6 @@ def generate_report(state: PipelineState) -> PipelineState:
         )
 
     call = state.get("directional_call")
-    call_emoji = ""
     verdict_section = ""
     if call:
         labels = {
@@ -1139,7 +1138,6 @@ def generate_report(state: PipelineState) -> PipelineState:
             "up": "⬆️ USD/COP SUBE (COP se debilita)",
             "neutral": "⏸️ NEUTRAL — el sistema se abstiene",
         }
-        call_emoji = {"down": "⬇️", "up": "⬆️", "neutral": "⏸️"}[call["direction"]]
         drivers = "".join(f"\n- {d}" for d in call["news_signal"]["drivers"])
         caveats = "".join(f"\n- {c}" for c in call["caveats"])
         market = state.get("market_signal") or {}
@@ -1216,53 +1214,19 @@ modelos {"concuerdan" if call["ts_signal"]["models_agree"] else "difieren"})
     report_path = str(output_dir / f"report_{run_date}.md")
     Path(report_path).write_text(report, encoding="utf-8")
 
-    # Craft tweet (≤280 chars)
-    call_line = ""
-    if call:
-        call_line = (
-            f"{call_emoji} Señal {call['horizon_days']}d: {call['direction'].upper()} "
-            f"(confianza {call['confidence']:.0%})\n"
-        )
-    top = state.get("top_story") or {}
-    top_title = str(top.get("display_title") or top.get("title", "")).strip()
-    top_source = str(top.get("source", "")).strip()
-    top_line = ""
-    if top_title:
-        story = f"{top_title} ({top_source})" if top_source else top_title
-        top_line = f"Noticia clave: {_shorten(story, 105)}\n"
-
-    tweet = _shorten(
-        (
-            f"COP/USD — {run_date}\n"
-            f"💵 1 USD = {latest:,.0f} COP ({change:+.1f}% 30d)\n"
-            f"{call_line}"
-            f"{top_line}"
-            f"#COP #Dólar #Colombia"
-        ),
-        280,
-    )
-
-    return {"report_markdown": report, "report_path": report_path, "tweet_text": tweet}
-
-
-def _shorten(text: str, max_chars: int) -> str:
-    """Trim text without breaking the 280-char Twitter/X limit."""
-    clean = " ".join(text.split())
-    if len(clean) <= max_chars:
-        return clean
-    return clean[: max_chars - 1].rstrip() + "…"
+    return {"report_markdown": report, "report_path": report_path}
 
 
 # ---------------------------------------------------------------------------
-# Node: human_review  (Etapa 6 — HITL con interrupt antes de publicar)
+# Node: human_review  (Etapa 6 — HITL con interrupt para revisar el veredicto)
 # ---------------------------------------------------------------------------
 
 
 def human_review(state: PipelineState) -> PipelineState:
-    """Punto de control humano antes de publicar (human-in-the-loop).
+    """Punto de control humano antes de finalizar la corrida (human-in-the-loop).
 
     Solo actúa con `hitl_enabled=True` (que exige un checkpointer). Llama a
-    `interrupt(...)` con el tweet y el veredicto: el grafo SE PAUSA y el payload
+    `interrupt(...)` con el veredicto del día: el grafo SE PAUSA y el payload
     vuelve al llamador (CLI/dashboard). La corrida se reanuda con
     `Command(resume={"approved": bool})` y ese valor es lo que devuelve
     `interrupt`. Sin HITL es un passthrough — el comportamiento por defecto del
@@ -1274,76 +1238,13 @@ def human_review(state: PipelineState) -> PipelineState:
     call = state.get("directional_call") or {}
     decision = interrupt(
         {
-            "type": "publish_approval",
-            "tweet_text": state.get("tweet_text", ""),
+            "type": "verdict_review",
             "direction": call.get("direction"),
             "confidence": call.get("confidence"),
-            "question": "¿Publicar este tweet? Reanuda con {'approved': true|false}.",
+            "report_path": state.get("report_path", ""),
+            "question": "¿Aceptar este veredicto? Reanuda con {'approved': true|false}.",
         }
     )
     approved = bool(decision.get("approved")) if isinstance(decision, dict) else bool(decision)
-    edited = decision.get("tweet_text") if isinstance(decision, dict) else None
     logger.info("human_review: %s", "aprobado" if approved else "rechazado")
-    updates: PipelineState = {"publish_approved": approved}
-    if edited:
-        updates["tweet_text"] = str(edited)
-    return updates
-
-
-# ---------------------------------------------------------------------------
-# Node: publish
-# ---------------------------------------------------------------------------
-
-
-def publish(state: PipelineState) -> PipelineState:
-    """Post the daily tweet (only when twitter_enabled=True)."""
-    if not state.get("publish_enabled", False):
-        logger.info("publish: skipped (publish_enabled=False)")
-        return {}
-    if state.get("hitl_enabled", False) and not state.get("publish_approved", False):
-        logger.info("publish: skipped (HITL — humano no aprobó)")
-        return {}
-
-    settings = get_settings()
-    if not settings.twitter_enabled:
-        return {}
-
-    tweet_text = state.get("tweet_text", "")
-    if not tweet_text:
-        return {}
-
-    try:
-        import tweepy
-
-        client = tweepy.Client(
-            bearer_token=(
-                settings.twitter_bearer_token.get_secret_value()
-                if settings.twitter_bearer_token
-                else None
-            ),
-            consumer_key=(
-                settings.twitter_api_key.get_secret_value() if settings.twitter_api_key else None
-            ),
-            consumer_secret=(
-                settings.twitter_api_secret.get_secret_value()
-                if settings.twitter_api_secret
-                else None
-            ),
-            access_token=(
-                settings.twitter_access_token.get_secret_value()
-                if settings.twitter_access_token
-                else None
-            ),
-            access_token_secret=(
-                settings.twitter_access_token_secret.get_secret_value()
-                if settings.twitter_access_token_secret
-                else None
-            ),
-        )
-        resp = client.create_tweet(text=tweet_text)
-        tweet_id = str(resp.data["id"])
-        logger.info("Tweet published: %s", tweet_id)
-        return {"tweet_id": tweet_id}
-    except Exception as exc:
-        logger.error("publish tweet failed: %s", exc)
-        return {"errors": [f"publish: {exc}"]}
+    return {"review_approved": approved}
