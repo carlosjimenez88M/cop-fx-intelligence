@@ -1,8 +1,11 @@
-.PHONY: install lint fmt type-check test test-unit test-integration run clean
+.PHONY: install lint fmt fmt-check type-check test test-unit test-integration \
+        test-cov run api docker-build docker-up docker-down \
+        pre-commit-install pre-commit clean help
 
 # ── Install ────────────────────────────────────────────────────────────────
 install:
 	uv sync --all-extras
+	uv run pre-commit install
 
 # ── Lint & Format ──────────────────────────────────────────────────────────
 lint:
@@ -16,6 +19,13 @@ fmt-check:
 
 type-check:
 	uv run mypy src/cop_fx
+
+# ── Pre-commit ───────────────────────────────────────────────────────────────
+pre-commit-install:
+	uv run pre-commit install
+
+pre-commit:
+	uv run pre-commit run --all-files
 
 # ── Tests ──────────────────────────────────────────────────────────────────
 test:
@@ -35,8 +45,18 @@ test-cov:
 run:
 	uv run cop-fx run
 
-run-publish:
-	uv run cop-fx run --publish
+api:
+	uv run cop-fx-api
+
+# ── Docker ───────────────────────────────────────────────────────────────────
+docker-build:
+	docker compose build
+
+docker-up:
+	docker compose up api dashboard
+
+docker-down:
+	docker compose down
 
 # ── Clean ──────────────────────────────────────────────────────────────────
 clean:
@@ -50,15 +70,20 @@ clean:
 
 help:
 	@echo "Available targets:"
-	@echo "  install         Install all dependencies with uv"
-	@echo "  lint            Run ruff linter"
-	@echo "  fmt             Auto-format with ruff"
-	@echo "  fmt-check       Check formatting (CI mode)"
-	@echo "  type-check      Run mypy type checker"
-	@echo "  test            Run all tests"
-	@echo "  test-unit       Run unit tests only"
-	@echo "  test-integration Run integration tests only"
-	@echo "  test-cov        Run tests with HTML coverage report"
-	@echo "  run             Run daily pipeline (dry-run, no tweet)"
-	@echo "  run-publish     Run pipeline and publish tweet"
-	@echo "  clean           Remove build artifacts and caches"
+	@echo "  install            Install deps with uv + register pre-commit hooks"
+	@echo "  lint               Run ruff linter"
+	@echo "  fmt                Auto-format with ruff"
+	@echo "  fmt-check          Check formatting (CI mode)"
+	@echo "  type-check         Run mypy type checker"
+	@echo "  pre-commit-install Register the git pre-commit hooks"
+	@echo "  pre-commit         Run all pre-commit hooks on every file"
+	@echo "  test               Run all tests"
+	@echo "  test-unit          Run unit tests only"
+	@echo "  test-integration   Run integration tests only"
+	@echo "  test-cov           Run tests with HTML coverage report"
+	@echo "  run                Run daily pipeline"
+	@echo "  api                Serve the FastAPI API (uvicorn)"
+	@echo "  docker-build       Build all docker images"
+	@echo "  docker-up          Run api + dashboard via docker compose"
+	@echo "  docker-down        Stop docker compose services"
+	@echo "  clean              Remove build artifacts and caches"

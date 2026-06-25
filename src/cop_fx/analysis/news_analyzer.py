@@ -65,7 +65,7 @@ what the news IS (`topic`) and HOW it transmits to the USD/COP rate
   - index: the 0-based position of the article in the list below
   - topic: the article's domain (sports and culture stories exist in the
     taxonomy — do NOT force them into economic categories)
-  - keywords: 3-5 key terms in Spanish
+  - keywords: 1-5 key terms in Spanish
   - entities: up to 5 named entities (people, institutions, companies, places)
   - fx_relevance: direct | indirect | none. Think second-order channels:
     a drought is indirect via food inflation; an epidemic via growth and

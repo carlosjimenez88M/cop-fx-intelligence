@@ -1,0 +1,48 @@
+# Pre-commit: barreras locales antes de cada commit.
+# Instalar una vez:  uv run pre-commit install   (o `make install`)
+# Correr a mano:      uv run pre-commit run --all-files   (o `make pre-commit`)
+#
+# Mantiene el mismo contrato que la solía garantizar CI (ruff + mypy) pero en
+# local, de modo que nunca se commitea código sin formatear o con tipos rotos.
+# Los notebooks quedan fuera a propósito: el proyecto solo formatea src/ y tests/.
+exclude: '^(notebooks/|.*\.ipynb$)'
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-toml
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: debug-statements
+
+  # Ruff y mypy como hooks LOCALES: corren en el entorno uv del proyecto, así
+  # usan la MISMA versión de ruff y ven las MISMAS deps (tenacity, pydantic...)
+  # que `make lint`/`make fmt`/`make type-check`. Evita el version-skew típico
+  # de fijar una rev distinta a la del proyecto.
+  - repo: local
+    hooks:
+      - id: ruff-lint
+        name: ruff (lint)
+        entry: uv run ruff check --fix
+        language: system
+        types: [python]
+        files: '^(src|tests)/.*\.py$'
+      - id: ruff-format
+        name: ruff (format)
+        entry: uv run ruff format
+        language: system
+        types: [python]
+        files: '^(src|tests)/.*\.py$'
+      - id: mypy
+        name: mypy (uv)
+        entry: uv run mypy src/cop_fx
+        language: system
+        types: [python]
+        pass_filenames: false
+        files: '^src/cop_fx/.*\.py$'

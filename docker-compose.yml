@@ -1,0 +1,49 @@
+# COP/USD Intelligence — orquestación local.
+#
+#   docker compose up api          → API en http://localhost:8000/docs
+#   docker compose up dashboard    → Streamlit en http://localhost:8501
+#   docker compose run --rm test   → corre la suite unitaria
+#
+# Los secretos se inyectan por env_file (.env); nunca se hornean en la imagen.
+
+services:
+  api:
+    build:
+      context: .
+      target: production
+    image: cop-fx-intelligence:api
+    container_name: cop-fx-api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      COP_FX_API_HOST: 0.0.0.0
+      COP_FX_API_PORT: "8000"
+    ports:
+      - "8000:8000"
+    # Datos y reportes persistentes fuera de la imagen.
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+
+  dashboard:
+    build:
+      context: .
+      target: dashboard
+    image: cop-fx-intelligence:dashboard
+    container_name: cop-fx-dashboard
+    restart: unless-stopped
+    env_file: [.env]
+    ports:
+      - "8501:8501"
+    volumes:
+      - ./data:/app/data
+      - ./reports:/app/reports
+
+  test:
+    build:
+      context: .
+      target: test
+    image: cop-fx-intelligence:test
+    container_name: cop-fx-test
+    env_file: [.env]
+    profiles: ["ci"]

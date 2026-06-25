@@ -135,12 +135,12 @@ def compile_graph(
 ) -> CompiledStateGraph[PipelineState]:
     """Compila el grafo con las dos memorias de LangGraph (Etapa 6).
 
-      - `checkpointer`: memoria por hilo (`thread_id`). Obligatoria para `interrupt`
-        y para reanudar en otro proceso. Si es None, el grafo corre sin estado
-        persistente (comportamiento clásico del pipeline batch).
-      - `store`: memoria de largo plazo entre hilos. El nodo `load_memory` publica
-        ahí el track-record; por defecto se inyecta un `InMemoryStore` para que la
-        interfaz exista en cada corrida (la fuente durable es `predictions.db`).
+    - `checkpointer`: memoria por hilo (`thread_id`). Obligatoria para `interrupt`
+      y para reanudar en otro proceso. Si es None, el grafo corre sin estado
+      persistente (comportamiento clásico del pipeline batch).
+    - `store`: memoria de largo plazo entre hilos. El nodo `load_memory` publica
+      ahí el track-record; por defecto se inyecta un `InMemoryStore` para que la
+      interfaz exista en cada corrida (la fuente durable es `predictions.db`).
     """
     if store is None:
         store = get_store()

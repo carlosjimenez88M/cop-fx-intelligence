@@ -73,6 +73,8 @@ Reject generic context words, country names, broad labels, source names, and
 terms that are only frequent because the product is about Colombia or FX.
 
 Return one decision per term. Use Spanish in reasons.
+
+Think step by step and take a feedback loop into your conclusions.:
 """
 
 

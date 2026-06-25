@@ -1,0 +1,7 @@
+{
+  "dependencies": ["."],
+  "graphs": {
+    "cop_fx": "./src/cop_fx/agents/graph.py:build_graph"
+  },
+  "env": ".env"
+}

@@ -19,11 +19,11 @@ descarga SOLO para los artículos materiales que van a los workers.
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import Any
 
-import httpx
 from bs4 import BeautifulSoup
 
+from cop_fx.data.http import fetch_text
 from cop_fx.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,12 +32,7 @@ MAX_BODY_CHARS = 3500
 # Menos que esto NO es un artículo: es boilerplate de paywall/cookies.
 # Devolver '' obliga al analyzer a caer al summary RSS (más honesto).
 MIN_BODY_CHARS = 400
-_HEADERS = {"User-Agent": "Mozilla/5.0 (cop-fx-intelligence)"}
 _SKIP_PARENTS = {"script", "style", "aside", "figure", "figcaption", "footer", "nav", "form"}
-
-
-class _HasBody(Protocol):
-    url: str
 
 
 def extract_body_from_html(html: str, *, max_chars: int = MAX_BODY_CHARS) -> str:
@@ -65,23 +60,24 @@ def extract_body_from_html(html: str, *, max_chars: int = MAX_BODY_CHARS) -> str
 
 
 def fetch_article_body(url: str, *, max_chars: int = MAX_BODY_CHARS, timeout: float = 15.0) -> str:
-    """Descarga la página del artículo y extrae su cuerpo. '' si falla."""
-    try:
-        with httpx.Client(timeout=timeout, headers=_HEADERS, follow_redirects=True) as client:
-            resp = client.get(url)
-            resp.raise_for_status()
-        body = extract_body_from_html(resp.text, max_chars=max_chars)
-        if len(body) < MIN_BODY_CHARS:
-            logger.warning(
-                "Cuerpo demasiado corto (%d chars) en %s — probable paywall/boilerplate",
-                len(body),
-                url,
-            )
-            return ""
-        return body
-    except Exception as exc:
-        logger.warning("No se pudo extraer el cuerpo de %s: %s", url, exc)
+    """Descarga la página del artículo y extrae su cuerpo. '' si falla.
+
+    La descarga (con reintentos sobre errores transitorios) la hace el cliente
+    compartido :func:`cop_fx.data.http.fetch_text`; aquí solo se decide qué
+    hacer con el HTML.
+    """
+    html = fetch_text(url, timeout=timeout)
+    if html is None:
         return ""
+    body = extract_body_from_html(html, max_chars=max_chars)
+    if len(body) < MIN_BODY_CHARS:
+        logger.warning(
+            "Cuerpo demasiado corto (%d chars) en %s — probable paywall/boilerplate",
+            len(body),
+            url,
+        )
+        return ""
+    return body
 
 
 def attach_bodies(

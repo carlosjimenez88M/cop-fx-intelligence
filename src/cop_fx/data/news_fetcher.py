@@ -161,7 +161,7 @@ class NewsFetcher:
             with httpx.Client(timeout=20) as client:
                 resp = client.get("https://newsapi.org/v2/everything", params=params)
                 resp.raise_for_status()
-            data = resp.json()
+                data = resp.json()
         except Exception as exc:
             logger.warning("NewsAPI failed: %s", exc)
             return []

@@ -103,11 +103,38 @@ cp .env.example .env       # pon tu OPENAI_API_KEY
 uv sync
 
 uv run cop-fx run                          # pipeline completo
-uv run streamlit run dashboard/app.py     # desk: call, keywords, topics, forecast y aprendizaje
+uv run streamlit run dashboard/app.py     # desk minimalista: call del día, forecast y track record
+uv run cop-fx-api                          # API FastAPI → http://localhost:8000/docs
 uv run pytest -m unit                      # tests rápidos sin I/O real
 ```
 
 Cada corrida son ~9-11 llamadas al LLM: el grueso al tier fast (`gpt-5-mini`) y **una sola** al tier judge (`gpt-5.4-mini`), el adjudicador.
+
+### API HTTP (FastAPI)
+
+La misma inteligencia se expone como API modular (routers + servicios + protocolos,
+async de punta a punta). Endpoints bajo `/api/v1`:
+
+| Método | Ruta | Qué devuelve |
+|---|---|---|
+| `GET` | `/health` | Liveness |
+| `GET` | `/api/v1/predictions/latest` | El call vigente |
+| `GET` | `/api/v1/predictions` · `/metrics` | Historial y métricas del track record |
+| `GET` | `/api/v1/forecast` | Ensemble Prophet + ARIMA y su signo |
+| `GET` | `/api/v1/news` | Noticias clasificadas (capa GOLD) por importancia |
+| `GET` | `/api/v1/reports` · `/{fecha}` | Reportes diarios en Markdown |
+| `POST` | `/api/v1/pipeline/runs` | Dispara una corrida (asíncrona, 202) y la sigue por `job_id` |
+
+### Docker
+
+Imagen multi-stage basada en `uv` (no-root, healthcheck), con targets `production`
+(API), `dashboard` (Streamlit) y `test`:
+
+```bash
+docker compose up api          # API en http://localhost:8000/docs
+docker compose up dashboard    # Streamlit en http://localhost:8501
+docker compose run --rm test   # suite unitaria dentro del contenedor
+```
 
 ### Configuración operativa
 
@@ -176,7 +203,8 @@ src/cop_fx/
 │   ├── market_fetcher.py    ← Brent, DXY, bolsa CO (GXG)
 │   ├── news_fetcher.py      ← Feeds verificados + orden fecha/fuentes intercaladas
 │   ├── article_body.py      ← Texto COMPLETO del artículo (estilo readability)
-│   └── cnn_fetcher.py       ← CNN Español Colombia (RSS + HTML)
+│   ├── cnn_fetcher.py       ← CNN Español Colombia (HTML primario + RSS complemento)
+│   └── http.py              ← Cliente HTTP compartido: headers + reintentos (tenacity)
 ├── analysis/
 │   ├── news_analyzer.py     ← Clasificación estructurada sobre texto completo
 │   ├── topic_taxonomy.py    ← Familias de tópicos, canal e importancia
@@ -192,16 +220,23 @@ src/cop_fx/
 │   ├── models.py            ← Prophet + ARIMA(2,1,2) — orden respaldado por BIC y backtest
 │   ├── diagnostics.py       ← ADF/KPSS, ACF/PACF, grid AIC/BIC, Ljung-Box
 │   └── evaluator.py         ← Walk-forward CV
-└── tracking/
-    ├── predictions.py       ← Tabla predictions: cada veredicto se auto-califica
-    └── backtest.py          ← Backtest direccional vs baselines (momentum, always_up)
+├── tracking/
+│   ├── predictions.py       ← Tabla predictions: cada veredicto se auto-califica
+│   └── backtest.py          ← Backtest direccional vs baselines (momentum, always_up)
+└── api/                     ← FastAPI: routers + servicios + protocolos (async, SOLID)
+    ├── app.py               ← create_app(): fábrica con lifespan, CORS y middleware
+    ├── routers/             ← health, predictions, forecast, news, reports, pipeline
+    ├── services/            ← lógica desacoplada del HTTP (envuelve stores y pipeline)
+    ├── schemas.py           ← DTOs de entrada/salida (separados del dominio)
+    └── errors.py            ← errores de dominio → handlers JSON uniformes
 
 notebooks/                   ← El laboratorio (cada una ejecutada, con HTML en notebooks/html/)
 ├── 01_noticias.ipynb        ← Bronze→Silver→Gold, taxonomía, grafo de dependencias
 ├── 02_series_de_tiempo.ipynb← Diagnóstico Box-Jenkins + estudio de señales macro
 └── 03_producto_end_to_end.ipynb ← El sistema completo corriendo, de scraping a veredicto
 
-dashboard/app.py             ← Streamlit: call operativo, keywords GOLD, topics, forecast, learning loop
+dashboard/app.py             ← Streamlit minimalista: call del día, forecast y track record
+Dockerfile · docker-compose.yml ← Imagen multi-stage (uv) para API, dashboard y tests
 ```
 
 ---

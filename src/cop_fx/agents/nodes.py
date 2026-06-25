@@ -1172,9 +1172,7 @@ def generate_report(state: PipelineState) -> PipelineState:
         if top:
             display_title = top.get("display_title") or top["title"]
             original_note = (
-                f"\n\n*Titular original:* {top['title']}"
-                if display_title != top["title"]
-                else ""
+                f"\n\n*Titular original:* {top['title']}" if display_title != top["title"] else ""
             )
             top_story_section = (
                 f"**📌 Noticia del día:** {display_title} ({top['source']})"

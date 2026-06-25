@@ -85,8 +85,7 @@ def _cmd_run(args: argparse.Namespace, log: structlog.BoundLogger) -> None:
         log.info("Pipeline paused for human review", thread_id=thread)
         print("\n⏸️  HITL — revisión humana del veredicto:\n")
         print(
-            f"   Dirección: {payload.get('direction')}  ·  "
-            f"confianza: {payload.get('confidence')}"
+            f"   Dirección: {payload.get('direction')}  ·  confianza: {payload.get('confidence')}"
         )
         print(f"   Reporte: {payload.get('report_path')}\n")
         print("   Aceptar:  cop-fx resume --thread", thread, "--approve")
