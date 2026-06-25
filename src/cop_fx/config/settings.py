@@ -137,7 +137,12 @@ class Settings(BaseSettings):
         0.10, ge=0.0, description="Banda muerta del forecast (la serie se abstiene)"
     )
     market_dead_band_pct: float = Field(
-        0.30, ge=0.0, description="Banda muerta del equity (sin sesgo de mercado)"
+        0.30, ge=0.0, description="(legacy) Banda muerta de la señal de mercado de una sola serie"
+    )
+    market_risk_band: float = Field(
+        0.25,
+        ge=0.0,
+        description="Banda muerta del composite de riesgo macro (en z-score); dentro ⇒ neutral",
     )
 
     # ------------------------------------------------------------------

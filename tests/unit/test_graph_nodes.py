@@ -377,45 +377,44 @@ def test_analyze_news_uses_analyzer() -> None:
     assert result.get("news_summary") == "Market is neutral."
 
 
-# ── fetch_market (integración del estudio macro) ─────────────────────────
+# ── fetch_market (composite de riesgo coincidente) ───────────────────────
 
 
-def _market_series(last_two: tuple[float, float]) -> pd.DataFrame:
-    return pd.DataFrame(
-        {"ds": pd.date_range("2026-06-01", periods=2, freq="D"), "y": list(last_two)}
-    )
+def _ctx(composite: float) -> dict[str, object]:
+    return {
+        "composite": composite,
+        "equity_ret_1d_pct": 0.5,
+        "dxy_ret_1d_pct": 0.1,
+        "brent_ret_1d_pct": -0.2,
+        "em_peers_ret_1d_pct": 0.3,
+        "n_drivers": 7,
+    }
 
 
 @pytest.mark.unit()
-def test_fetch_market_equity_rule() -> None:
-    # bolsa +1% ayer ⇒ COP se fortalece ⇒ USD/COP down
-    series = {
-        "GXG": _market_series((30.0, 30.3)),  # +1.0%
-        "DX-Y.NYB": _market_series((100.0, 100.1)),
-        "BZ=F": _market_series((70.0, 69.0)),
-    }
-    with patch(
-        "cop_fx.agents.nodes.fetch_yahoo_series",
-        side_effect=lambda symbol, lookback_days=30: series[symbol],
-    ):
+def test_fetch_market_risk_on_is_down() -> None:
+    # composite muy negativo ⇒ canasto risk-on ⇒ COP se fortalece ⇒ USD/COP down
+    with patch("cop_fx.agents.nodes.compute_risk_context", return_value=_ctx(-0.9)):
         result = fetch_market(_base_state())
 
     signal = result["market_signal"]
     assert signal["direction"] == "down"
-    assert signal["equity_ret_1d_pct"] == 1.0
+    assert signal["risk_composite"] == -0.9
+
+
+@pytest.mark.unit()
+def test_fetch_market_risk_off_is_up() -> None:
+    # composite muy positivo ⇒ canasto risk-off ⇒ presión al alza del USD/COP
+    with patch("cop_fx.agents.nodes.compute_risk_context", return_value=_ctx(0.9)):
+        result = fetch_market(_base_state())
+
+    assert result["market_signal"]["direction"] == "up"
 
 
 @pytest.mark.unit()
 def test_fetch_market_dead_band_is_neutral() -> None:
-    series = {
-        "GXG": _market_series((30.0, 30.03)),  # +0.1% < banda 0.3%
-        "DX-Y.NYB": _market_series((100.0, 100.0)),
-        "BZ=F": _market_series((70.0, 70.0)),
-    }
-    with patch(
-        "cop_fx.agents.nodes.fetch_yahoo_series",
-        side_effect=lambda symbol, lookback_days=30: series[symbol],
-    ):
+    # |composite| dentro de la banda (0.25 por defecto) ⇒ se abstiene
+    with patch("cop_fx.agents.nodes.compute_risk_context", return_value=_ctx(0.05)):
         result = fetch_market(_base_state())
 
     assert result["market_signal"]["direction"] == "neutral"
@@ -423,13 +422,11 @@ def test_fetch_market_dead_band_is_neutral() -> None:
 
 @pytest.mark.unit()
 def test_fetch_market_fails_soft() -> None:
-    with patch(
-        "cop_fx.agents.nodes.fetch_yahoo_series",
-        side_effect=ConnectionError("yahoo down"),
-    ):
+    # canasto vacío (todo Yahoo caído) ⇒ contexto opcional, no rompe el pipeline
+    with patch("cop_fx.agents.nodes.compute_risk_context", return_value={}):
         result = fetch_market(_base_state())
 
-    assert result["market_signal"] == {}  # contexto opcional: no rompe el pipeline
+    assert result["market_signal"] == {}
 
 
 # ── Etapa 4: compute_ts_signal / adjudicate ──────────────────────────────

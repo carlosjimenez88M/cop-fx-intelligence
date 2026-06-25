@@ -180,19 +180,29 @@ class TimeSeriesSignal(BaseModel):
 
 
 class MarketSignal(BaseModel):
-    """Contexto de mercado determinista — validado por el estudio macro.
+    """Contexto de mercado COINCIDENTE — un composite de riesgo, no un forecast.
 
-    El agregado bursátil colombiano (GXG) fue el ÚNICO activo con poder
-    adelantado robusto (equity[t-1]→cop[t] ≈ -0.4, ver notebooks/02):
-    bolsa arriba ayer ⇒ COP se fortalece ⇒ USD/COP tiende a bajar.
-    DXY y Brent van como contexto, no como voto. Café, oro, VIX, tasas US
-    y pares LatAm fueron probados y descartados con datos.
+    El estudio macro (notebooks/02) mostró que el USD/COP co-mueve fuerte y de
+    forma contemporánea con un canasto de riesgo emergente: bolsa local (-),
+    pares EM CLP/MXN/BRL (+), DXY (+) y commodities (-). Su poder PREDICTIVO a
+    1-5 días, en cambio, es débil (gboost y una GRU no superan de forma estable
+    al baseline trivial). Por eso esto es EVIDENCIA coincidente para el
+    adjudicador —el movimiento de ayer del canasto, ponderado por |correlación|
+    y normalizado por volatilidad— con banda muerta para abstenerse, NO una
+    predicción dura.
     """
 
-    direction: Direction = Field(description="Regla sobre el retorno de ayer del equity")
+    direction: Direction = Field(description="Banda muerta sobre el composite de riesgo")
     equity_ret_1d_pct: float
     dxy_ret_1d_pct: float
     brent_ret_1d_pct: float
+    # Contexto multi-driver (defaults → compatibilidad con filas/persistencia previas)
+    em_peers_ret_1d_pct: float = Field(
+        default=0.0, description="Retorno de ayer promedio de USD vs CLP/MXN/BRL"
+    )
+    risk_composite: float = Field(
+        default=0.0, description="Composite de riesgo (>0 ⇒ presión al alza del USD/COP)"
+    )
 
 
 class AdjudicatorVerdict(BaseModel):

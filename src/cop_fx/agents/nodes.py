@@ -30,7 +30,7 @@ from cop_fx.contracts import (
 )
 from cop_fx.data.article_body import attach_bodies
 from cop_fx.data.fx_fetcher import FXFetcher
-from cop_fx.data.market_fetcher import MARKET_SYMBOLS, fetch_yahoo_series
+from cop_fx.data.market_fetcher import compute_risk_context
 from cop_fx.data.news_fetcher import NewsFetcher
 from cop_fx.llm import get_chat_model
 from cop_fx.logger import get_logger
@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 _cfg = get_settings()
 MAX_TOPIC_WORKERS = _cfg.max_topic_workers
 TS_NEUTRAL_BAND_PCT = _cfg.ts_neutral_band_pct
-MARKET_DEAD_BAND_PCT = _cfg.market_dead_band_pct
+MARKET_RISK_BAND = _cfg.market_risk_band
 GATE_HEADLINES_CAP = _cfg.gate_headlines_cap
 MIN_ANALYZABLE_CHARS = _cfg.min_analyzable_chars
 
@@ -155,41 +155,48 @@ def fetch_news(state: PipelineState) -> PipelineState:
 
 
 def fetch_market(state: PipelineState) -> PipelineState:
-    """Contexto de mercado determinista para el adjudicador.
+    """Contexto de mercado COINCIDENTE para el adjudicador (no un forecast).
 
-    Aplica el hallazgo validado del estudio macro: el agregado bursátil
-    colombiano (GXG) de AYER es el único predictor adelantado robusto del
-    USD/COP (equity[t-1]→cop[t] ≈ -0.4). Bolsa arriba ⇒ COP se fortalece
-    ⇒ dirección `down`. DXY y Brent viajan como contexto, sin voto.
+    Lee el movimiento de ayer de un canasto de riesgo emergente —bolsa local,
+    pares EM (CLP/MXN/BRL), DXY y commodities— y lo agrega en un composite
+    orientado hacia "presión sobre el USD/COP", ponderando cada driver por su
+    |correlación| con el COP y normalizando por su volatilidad reciente.
+
+    Reemplaza la regla anterior de UNA sola serie (equity): el composite es más
+    estable y deja explícito que es CONTEXTO coincidente, no predicción (el
+    estudio de la notebook 02 mostró que la señal predictiva intradía es débil
+    y que ni gradient boosting ni una GRU la explotan de forma robusta).
 
     Es contexto OPCIONAL: si Yahoo falla, el pipeline sigue sin él.
     """
     try:
-        rets: dict[str, float] = {}
-        for name in ("equity", "dxy", "brent"):
-            series = fetch_yahoo_series(MARKET_SYMBOLS[name], lookback_days=30)
-            rets[name] = float(series["y"].iloc[-1] / series["y"].iloc[-2] - 1) * 100
+        ctx = compute_risk_context(lookback_days=40)
+        if not ctx:
+            return {"market_signal": {}}
 
-        equity = rets["equity"]
-        if equity > MARKET_DEAD_BAND_PCT:
-            direction = "down"  # bolsa arriba ⇒ apetito por Colombia ⇒ USD/COP baja
-        elif equity < -MARKET_DEAD_BAND_PCT:
-            direction = "up"
+        composite = float(ctx["composite"])  # type: ignore[arg-type]
+        if composite > MARKET_RISK_BAND:
+            direction = "up"  # canasto risk-off ⇒ presión al alza del USD/COP
+        elif composite < -MARKET_RISK_BAND:
+            direction = "down"  # canasto risk-on ⇒ COP se fortalece
         else:
             direction = "neutral"
 
         signal = MarketSignal(
             direction=direction,  # type: ignore[arg-type]
-            equity_ret_1d_pct=round(equity, 3),
-            dxy_ret_1d_pct=round(rets["dxy"], 3),
-            brent_ret_1d_pct=round(rets["brent"], 3),
+            equity_ret_1d_pct=float(ctx["equity_ret_1d_pct"]),  # type: ignore[arg-type]
+            dxy_ret_1d_pct=float(ctx["dxy_ret_1d_pct"]),  # type: ignore[arg-type]
+            brent_ret_1d_pct=float(ctx["brent_ret_1d_pct"]),  # type: ignore[arg-type]
+            em_peers_ret_1d_pct=float(ctx["em_peers_ret_1d_pct"]),  # type: ignore[arg-type]
+            risk_composite=composite,
         )
         logger.info(
-            "Market context: %s (equity %+.2f%%, dxy %+.2f%%, brent %+.2f%%)",
+            "Market context: %s (composite %+.2f · equity %+.2f%% · EM %+.2f%% · dxy %+.2f%%)",
             signal.direction,
-            equity,
-            rets["dxy"],
-            rets["brent"],
+            composite,
+            signal.equity_ret_1d_pct,
+            signal.em_peers_ret_1d_pct,
+            signal.dxy_ret_1d_pct,
         )
         return {"market_signal": signal.model_dump()}
     except Exception as exc:
