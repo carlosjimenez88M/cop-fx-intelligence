@@ -134,6 +134,10 @@ class LogisticDirectional:
     def predict_proba(self, x: np.ndarray) -> np.ndarray:
         return np.asarray(self._model.predict_proba(x))[:, 1]
 
+    def coefficients(self) -> np.ndarray:
+        """Coeficientes estandarizados (la entrada va escalada ⇒ comparables)."""
+        return np.asarray(self._model.named_steps["logisticregression"].coef_[0])
+
 
 class GradientBoostDirectional:
     """Gradient boosting (sklearn) — referencia no lineal sin deep learning."""
@@ -285,7 +289,24 @@ def macro_directional_signal(
         prob_up=round(prob_up, 4),
         horizon_days=horizon,
         n_train=len(feats),
+        top_drivers=_driver_importances(model.coefficients(), cols),
     )
+
+
+def _driver_importances(
+    coefs: np.ndarray, cols: list[str], *, top_k: int = 5
+) -> list[tuple[str, float]]:
+    """Agrega los |coef| estandarizados por serie base (suma de sus ventanas r1/r5/r10).
+
+    Devuelve los `top_k` drivers más influyentes como (serie, importancia). Es lo
+    que el adjudicador lee para saber QUÉ está moviendo la señal, no solo su signo.
+    """
+    agg: dict[str, float] = {}
+    for col, weight in zip(cols, coefs, strict=False):
+        base = col.rsplit("_r", 1)[0]
+        agg[base] = agg.get(base, 0.0) + abs(float(weight))
+    ranked = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)
+    return [(name, round(value, 3)) for name, value in ranked[:top_k]]
 
 
 # ---------------------------------------------------------------------------
